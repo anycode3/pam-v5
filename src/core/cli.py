@@ -12,7 +12,7 @@ from src.parser.kicad_netlist import KiCadNetlistParser
 from src.parser.target_params import TargetParamsParser
 from src.mapper.engine import MappingEngine, MappedGeometry
 from src.executor.klayout_executor import KLayoutExecutor
-from src.state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
+from state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
 from src.routing.types import PinState
 
 

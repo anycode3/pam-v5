@@ -21,7 +21,7 @@ from src.validator.drc_runner import KLayoutDRCRunner
 from src.validator.ref_mapper import ViolationRefMapper
 from src.validator.base import ValidationResult, Severity, LVSResult
 from src.validator.lvs_runner import KLayoutPureLVS
-from src.state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
+from state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
 from src.routing.types import PinState
 
 logger = logging.getLogger(__name__)
