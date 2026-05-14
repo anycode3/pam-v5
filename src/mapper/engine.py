@@ -8,7 +8,7 @@ from typing import Optional
 
 import yaml
 
-from parser.target_params import TargetParam
+from src.parser.target_params import TargetParam
 
 
 @dataclass

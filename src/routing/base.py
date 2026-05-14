@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from pcells.base import BasePCell
+from src.pcells.base import BasePCell
 
 import klayout.db as db
 

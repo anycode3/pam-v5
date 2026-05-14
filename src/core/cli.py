@@ -7,13 +7,13 @@ import logging
 import sys
 from pathlib import Path
 
-from core.runner import Runner, RunConfig
-from parser.kicad_netlist import KiCadNetlistParser
-from parser.target_params import TargetParamsParser
-from mapper.engine import MappingEngine, MappedGeometry
-from executor.klayout_executor import KLayoutExecutor
-from state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
-from routing.types import PinState
+from src.core.runner import Runner, RunConfig
+from src.parser.kicad_netlist import KiCadNetlistParser
+from src.parser.target_params import TargetParamsParser
+from src.mapper.engine import MappingEngine, MappedGeometry
+from src.executor.klayout_executor import KLayoutExecutor
+from src.state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
+from src.routing.types import PinState
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -39,7 +39,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # 映射
     mapper = MappingEngine(args.rules)
-    from pcells.registry import get_pcell
+    from src.pcells.registry import get_pcell
     mapped: list[MappedGeometry] = []
     for t in targets:
         mg = mapper.map(t)

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import klayout.db as db
 
 from .types import PinState, WireSegment, Connection
-from pcells.registry import get_pcell
+from src.pcells.registry import get_pcell
 
 logger = logging.getLogger(__name__)
 
