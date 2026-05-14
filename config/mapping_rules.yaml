@@ -1,0 +1,71 @@
+# PAM映射规则配置（主配置）
+# 电气值 → 几何参数 查表，含约束边界
+# target_pcell 必须与 pcells/registry.py 中注册名一致
+
+# ---- MIM电容 ----
+capacitor_mim:
+  target_pcell: "CAP_MIM"
+  # 查表结果字段名 → PCell参数名 映射
+  param_mapping:
+    length: length
+    width: width
+  # PCell参数默认值（查表结果中缺失时使用）
+  defaults: {}
+  constraints:
+    length: { min: 10, max: 200 }
+    width:  { min: 10, max: 200 }
+  lookup_table:
+    - { capacitance_pf: 0.5,  length: 28,  width: 28 }
+    - { capacitance_pf: 1.0,  length: 40,  width: 40 }
+    - { capacitance_pf: 2.0,  length: 57,  width: 57 }
+    - { capacitance_pf: 3.0,  length: 70,  width: 70 }
+    - { capacitance_pf: 5.0,  length: 90,  width: 90 }
+    - { capacitance_pf: 10.0, length: 127, width: 127 }
+
+# ---- 螺旋电感 ----
+inductor_spiral:
+  target_pcell: "IND_SPIRAL"
+  param_mapping:
+    inner_radius_um: inner_radius
+  defaults:
+    spacing: 8.0
+    angle: 0.0
+  constraints:
+    inner_radius: { min: 20, max: 80 }
+    turns:  { min: 1.5, max: 6.5 }
+    width:  { min: 5, max: 20 }
+    spacing: { min: 5, max: 15 }
+  lookup_table:
+    - { inductance_nH: 0.5, inner_radius_um: 30, turns: 1.5, width: 10 }
+    - { inductance_nH: 1.0, inner_radius_um: 35, turns: 2.0, width: 10 }
+    - { inductance_nH: 1.5, inner_radius_um: 40, turns: 2.5, width: 10 }
+    - { inductance_nH: 2.0, inner_radius_um: 50, turns: 3.0, width: 10 }
+    - { inductance_nH: 2.5, inner_radius_um: 50, turns: 3.5, width: 10 }
+    - { inductance_nH: 3.0, inner_radius_um: 55, turns: 4.0, width: 10 }
+    - { inductance_nH: 4.0, inner_radius_um: 60, turns: 4.5, width: 10 }
+    - { inductance_nH: 5.0, inner_radius_um: 65, turns: 5.0, width: 10 }
+
+# ---- 微带传输线 ----
+transmission_line: &tl_defaults
+  target_pcell: "TL_MICROSTRIP"
+  param_mapping:
+    length_um: length    # 查表字段length_um映射为PCell参数length
+  defaults:
+    angle: 0.0           # 默认水平放置
+  constraints:
+    width:  { min: 5, max: 200 }
+    length: { min: 50, max: 5000 }
+  lookup_table:
+    - { impedance_ohm: 25.0, length_um: 1000, width: 50 }
+    - { impedance_ohm: 25.0, length_um: 2000, width: 50 }
+    - { impedance_ohm: 38.5, length_um: 1000, width: 30 }
+    - { impedance_ohm: 38.5, length_um: 2000, width: 30 }
+    - { impedance_ohm: 50.0, length_um: 500,  width: 20 }
+    - { impedance_ohm: 50.0, length_um: 1000, width: 20 }
+    - { impedance_ohm: 50.0, length_um: 2000, width: 20 }
+    - { impedance_ohm: 50.0, length_um: 3000, width: 20 }
+    - { impedance_ohm: 72.0, length_um: 1000, width: 10 }
+    - { impedance_ohm: 72.0, length_um: 2000, width: 10 }
+
+# 兼容性别名（旧的key名，引用transmission_line的定义）
+TL_MICROSTRIP: *tl_defaults

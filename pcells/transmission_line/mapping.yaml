@@ -1,0 +1,21 @@
+# 微带传输线映射规则
+TL_MICROSTRIP:
+  target_pcell: "TL_MICROSTRIP"
+  param_mapping:
+    length_um: length
+  defaults:
+    angle: 0.0
+  constraints:
+    width:  { min: 5, max: 200 }
+    length: { min: 50, max: 5000 }
+  lookup_table:
+    - { impedance_ohm: 25.0, length_um: 1000, width: 50 }
+    - { impedance_ohm: 25.0, length_um: 2000, width: 50 }
+    - { impedance_ohm: 38.5, length_um: 1000, width: 30 }
+    - { impedance_ohm: 38.5, length_um: 2000, width: 30 }
+    - { impedance_ohm: 50.0, length_um: 500,  width: 20 }
+    - { impedance_ohm: 50.0, length_um: 1000, width: 20 }
+    - { impedance_ohm: 50.0, length_um: 2000, width: 20 }
+    - { impedance_ohm: 50.0, length_um: 3000, width: 20 }
+    - { impedance_ohm: 72.0, length_um: 1000, width: 10 }
+    - { impedance_ohm: 72.0, length_um: 2000, width: 10 }

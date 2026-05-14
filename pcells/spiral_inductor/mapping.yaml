@@ -1,0 +1,24 @@
+# 螺旋电感映射规则
+# 电感值 → 几何参数查表
+
+inductor_spiral:
+  target_pcell: "IND_SPIRAL"
+  param_mapping:
+    inner_radius_um: inner_radius
+  defaults:
+    spacing: 8.0
+    angle: 0.0
+  constraints:
+    inner_radius: { min: 20, max: 80 }
+    turns:  { min: 1.5, max: 6.5 }
+    width:  { min: 5, max: 20 }
+    spacing: { min: 5, max: 15 }
+  lookup_table:
+    - { inductance_nH: 0.5, inner_radius_um: 30, turns: 1.5, width: 10 }
+    - { inductance_nH: 1.0, inner_radius_um: 35, turns: 2.0, width: 10 }
+    - { inductance_nH: 1.5, inner_radius_um: 40, turns: 2.5, width: 10 }
+    - { inductance_nH: 2.0, inner_radius_um: 50, turns: 3.0, width: 10 }
+    - { inductance_nH: 2.5, inner_radius_um: 50, turns: 3.5, width: 10 }
+    - { inductance_nH: 3.0, inner_radius_um: 55, turns: 4.0, width: 10 }
+    - { inductance_nH: 4.0, inner_radius_um: 60, turns: 4.5, width: 10 }
+    - { inductance_nH: 5.0, inner_radius_um: 65, turns: 5.0, width: 10 }

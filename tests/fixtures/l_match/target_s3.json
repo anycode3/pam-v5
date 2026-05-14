@@ -1,0 +1,9 @@
+[
+  {
+    "reference": "L1",
+    "type": "inductor_spiral",
+    "params": {
+      "inductance_nH": 5.0
+    }
+  }
+]

@@ -1,0 +1,9 @@
+[
+  {
+    "reference": "C1",
+    "type": "capacitor_mim",
+    "params": {
+      "capacitance_pf": 3.0
+    }
+  }
+]

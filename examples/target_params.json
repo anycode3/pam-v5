@@ -1,0 +1,24 @@
+[
+  {
+    "reference": "C1",
+    "type": "capacitor_mim",
+    "params": {
+      "capacitance_pf": 2.0
+    }
+  },
+  {
+    "reference": "L1",
+    "type": "inductor_spiral",
+    "params": {
+      "inductance_nH": 2.0
+    }
+  },
+  {
+    "reference": "TL1",
+    "type": "transmission_line",
+    "params": {
+      "impedance_ohm": 50,
+      "length_um": 2000
+    }
+  }
+]

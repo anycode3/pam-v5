@@ -1,0 +1,52 @@
+# PAM简化DRC规则
+# 层名格式: "layer/datatype"
+
+rules:
+  # Metal1 (传输线信号层) 最小间距
+  - name: "metal1.min_spacing"
+    layer: "6/0"
+    type: "spacing"
+    value: 1.0       # um
+    severity: "error"
+
+  # Metal1 最小线宽
+  - name: "metal1.min_width"
+    layer: "6/0"
+    type: "width"
+    value: 2.0       # um
+    severity: "error"
+
+  # MIM电容层 最小面积
+  - name: "mim.min_area"
+    layer: "9/0"
+    type: "area"
+    value: 100.0     # um²
+    severity: "error"
+
+  # 顶层金属(上极板) 最小间距
+  - name: "metal_top.min_spacing"
+    layer: "10/0"
+    type: "spacing"
+    value: 1.0       # um
+    severity: "error"
+
+  # 底层金属(下极板) 最小间距
+  - name: "metal_bot.min_spacing"
+    layer: "8/0"
+    type: "spacing"
+    value: 1.0       # um
+    severity: "error"
+
+  # Metal2 (螺旋电感顶层走线) 最小间距
+  - name: "metal2.min_spacing"
+    layer: "7/0"
+    type: "spacing"
+    value: 1.0       # um
+    severity: "error"
+
+  # Metal2 最小线宽
+  - name: "metal2.min_width"
+    layer: "7/0"
+    type: "width"
+    value: 3.0       # um
+    severity: "error"

@@ -1,0 +1,16 @@
+[
+  {
+    "reference": "C1",
+    "type": "capacitor_mim",
+    "params": {
+      "capacitance_pf": 5.0
+    }
+  },
+  {
+    "reference": "L1",
+    "type": "inductor_spiral",
+    "params": {
+      "inductance_nH": 4.0
+    }
+  }
+]
