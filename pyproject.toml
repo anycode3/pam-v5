@@ -23,7 +23,8 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["pcells*", "src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
