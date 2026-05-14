@@ -1,0 +1,17 @@
+[
+  {
+    "reference": "TL1",
+    "type": "TL_MICROSTRIP",
+    "params": {
+      "impedance_ohm": 50.0,
+      "length_um": 2000
+    }
+  },
+  {
+    "reference": "L1",
+    "type": "inductor_spiral",
+    "params": {
+      "inductance_nH": 2.0
+    }
+  }
+]
