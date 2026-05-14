@@ -39,7 +39,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # 映射
     mapper = MappingEngine(args.rules)
-    from src.pcells.registry import get_pcell
+    from pcells.registry import get_pcell
     mapped: list[MappedGeometry] = []
     for t in targets:
         mg = mapper.map(t)
