@@ -16,7 +16,7 @@ dev = [
 ]
 
 [project.scripts]
-pam = "core.cli:main"
+pam = "src.core.cli:main"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
