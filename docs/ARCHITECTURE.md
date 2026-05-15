@@ -5,19 +5,16 @@
 ```mermaid
 flowchart TB
     subgraph 输入文件
-        A1[KiCad 网表<br/>.net 文件]
-        A2[目标参数<br/>.json 文件]
-        A3[映射规则<br/>mapping_rules.yaml]
-    end
-
-    subgraph CLI模块[CLI 入口<br/>src/core/cli.py]
-        C1[pam init 命令]
-        C2[pam run 命令]
+        A1[原始 KiCad 网表<br/>orig.net]
+        A2[修改后 KiCad 网表<br/>mod.net]
+        A3[原始 GDS 版图<br/>input.gds]
+        A4[映射规则<br/>mapping_rules.yaml]
     end
 
     subgraph Parser模块[Parser 解析器<br/>src/parser/]
         P1[KiCadNetlistParser<br/>解析网表]
-        P2[TargetParamsParser<br/>解析目标参数]
+        P2[diff_netlists<br/>网表差异比较]
+        P3[parse_value<br/>值字符串解析]
     end
 
     subgraph Mapper模块[Mapper 映射引擎<br/>src/mapper/]
@@ -30,10 +27,14 @@ flowchart TB
         PC3[TL_MICROSTRIP<br/>微带传输线]
     end
 
-    subgraph Executor模块[Executor 执行器<br/>src/executor/]
-        E1[KLayoutExecutor<br/>执行PCell更新]
-        E2[StretchRouter<br/>连线拉伸]
-        E3[WireFinder<br/>连线发现]
+    subgraph Extraction模块[GDS 提取<br/>src/routing/]
+        EX1[pin_extractor<br/>引脚坐标提取]
+        EX2[wire_extractor<br/>连线提取/擦除]
+    end
+
+    subgraph Router模块[布线器<br/>src/routing/]
+        R1[InitialRouter<br/>直连/L型布线]
+        R2[draw_wire_segments<br/>绘制连线]
     end
 
     subgraph Validator模块[Validator 验证器<br/>src/validator/]
@@ -41,60 +42,77 @@ flowchart TB
         V2[KLayoutPureLVS<br/>版图vs原理图]
     end
 
-    subgraph State模块[State 状态管理<br/>state/]
-        S1[SnapshotManager<br/>快照管理]
+    subgraph State模块[状态管理<br/>state/]
+        S1[GDSBackupManager<br/>GDS 备份/回滚]
     end
 
-    subgraph 输出文件
-        O1[GDS 版图文件]
-        O2[DRC 报告]
-        O3[参数快照.json]
+    subgraph Runner调度器[Runner<br/>src/core/runner.py]
+        RN1[1.解析网表]
+        RN2[2.Diff]
+        RN3[3.映射]
+        RN4[4.提取旧连线]
+        RN5[5.替换器件]
+        RN6[6.擦除+重布线]
+        RN7[7.DRC]
+        RN8[8.LVS]
+        RN9[9.记录历史]
     end
 
     A1 --> P1
-    A2 --> P2
-    A3 --> M1
-
-    C1 --> P1
-    C1 --> P2
-    C1 --> M1
-    C1 --> PC1
-    C1 --> E1
-    C1 --> S1
-
-    C2 --> P1
-    C2 --> P2
-    C2 --> M1
-    C2 --> E1
-    C2 --> E2
-    C2 --> E3
-    C2 --> V1
-    C2 --> V2
-    C2 --> S1
-
-    P1 --> M1
-    P2 --> M1
+    A2 --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> M1
+    A4 --> M1
 
     M1 --> PC1
     M1 --> PC2
     M1 --> PC3
 
-    PC1 --> E1
-    PC2 --> E1
-    PC3 --> E1
+    A3 --> EX1
+    A3 --> EX2
+    EX1 --> R1
+    EX2 --> RN6
 
-    E1 --> E2
-    E1 --> E3
-    E3 --> E2
+    PC1 --> RN5
+    PC2 --> RN5
+    PC3 --> RN5
+    R1 --> R2
 
-    E1 --> V1
-    E1 --> V2
+    RN5 --> V1
+    V1 --> V2
+    S1 --> V1
 
-    E1 --> S1
+    subgraph 输出文件
+        O1[输出 GDS 版图]
+        O2[DRC 报告]
+        O3[历史记录.jsonl]
+    end
 
-    E1 --> O1
+    R2 --> O1
     V1 --> O2
-    S1 --> O3
+    RN9 --> O3
+```
+
+---
+
+## 核心流程（Runner.run）
+
+```
+1. 解析原始网表          KiCadNetlistParser.parse(orig.net)
+2. 解析修改后网表        KiCadNetlistParser.parse(mod.net)
+3. Diff 网表             diff_netlists() → 找出值变化的器件
+4. 映射几何参数          parse_value() + MappingEngine.map()
+5. 保存 GDS 备份         GDSBackupManager.save_backup()
+6. 更新版图              _update_layout():
+   6a. 提取旧连线        extract_wires_from_gds()
+   6b. 替换器件          PCell.generate()
+   6c. 擦除旧连线        erase_wires_from_top_cell()
+   6d. 重新布线          InitialRouter.route_affected_nets()
+   6e. 绘制新连线        draw_wire_segments()
+7. DRC 验证              KLayoutDRCRunner + 自动重试（最多3次）
+8. LVS 验证（可选）      KLayoutPureLVS
+9. 记录历史              _append_history()
 ```
 
 ---
@@ -103,13 +121,12 @@ flowchart TB
 
 ### 1. CLI 入口 (src/core/cli.py)
 
-**职责：** 命令行入口，解析用户命令
+**职责：** 命令行入口，解析 `pam run` 命令
 
 **命令：**
 | 命令 | 用途 |
 |------|------|
-| `pam init` | 冷启动，生成初版 GDS |
-| `pam run` | 迭代优化，更新版图 |
+| `pam run` | 执行版图迭代更新（唯一命令） |
 
 ---
 
@@ -120,24 +137,25 @@ flowchart TB
 **输入：** KiCad 网表文件 (.net)
 
 **输出：**
-- `components`: 器件列表 {ref, type, value, footprint}
-- `nets`: 网络列表 {name, nodes}
+- `components`: 器件列表 [{ref, type, value, footprint}]
+- `nets`: 网络列表 [{name, nodes}]
 
-**依赖：** `sexpdata` 库（解析 S-expression）
+#### 2.2 diff_netlists (netlist_diff.py)
 
----
+**输入：** 两个器件列表
 
-#### 2.2 TargetParamsParser
-
-**输入：** 目标参数文件 (.json)
-
-**输出：** `TargetParam` 列表
+**输出：** `NetlistDiffResult`
 ```python
-TargetParam:
-  reference: str   # 器件引用名，如 "C1"
-  device_type: str # 器件类型，如 "capacitor_mim"
-  params: dict     # 电气参数，如 {"capacitance_pf": 2.0}
+NetlistDiffResult:
+  changed: List[DeviceDiff]  # 值变化的器件
+  errors: List[str]          # 不支持的变更（增减/类型变化）
 ```
+
+#### 2.3 parse_value (value_parser.py)
+
+**输入：** (part_name, value_str)，如 ("CAP_MIM", "2pF")
+
+**输出：** 电气参数字典，如 `{"capacitance_pf": 2.0}`
 
 ---
 
@@ -145,152 +163,90 @@ TargetParam:
 
 #### MappingEngine
 
-**输入：**
-- `TargetParam` 列表
-- `mapping_rules.yaml`（查表规则）
+**输入：** TargetParam + mapping_rules.yaml
 
-**输出：** `MappedGeometry` 列表
+**输出：** MappedGeometry
 ```python
 MappedGeometry:
-  reference: str      # 器件引用
-  target_pcell: str   # PCell 类型，如 "CAP_MIM"
+  reference: str       # 器件引用
+  target_pcell: str    # PCell 类型，如 "CAP_MIM"
   geometry_params: dict # 几何参数，如 {"length": 57, "width": 57}
-  warnings: list      # 约束警告
+  warnings: list       # 约束警告
 ```
-
-**逻辑：**
-1. 查表：电气值 → 几何值
-2. 字段名映射
-3. 约束边界检查
 
 ---
 
 ### 4. PCells 模块 (pcells/)
 
-| PCell | 输入参数 | 输出 |
+| PCell | 输入参数 | 引脚 |
 |-------|---------|------|
-| CAP_MIM | length, width | MIM 电容版图 |
-| IND_SPIRAL | inner_radius, turns, width, spacing, angle | 螺旋电感版图 |
-| TL_MICROSTRIP | width, length, angle | 传输线版图 |
+| CAP_MIM | length, width | PI（正端）, NIN（负端） |
+| IND_SPIRAL | inner_radius, turns, width, spacing, angle | P1, P2 |
+| TL_MICROSTRIP | width, length, angle | P1, P2 |
 
 **每个 PCell 提供：**
 - `generate()`: 生成版图形状
 - `validate_params()`: 参数校验
 - `get_pin_positions()`: 获取引脚坐标
-- `get_bounding_box()`: 获取包围盒
-
-**依赖：** `klayout.db`（KLayout Python API）
 
 ---
 
-### 5. Executor 模块 (src/executor/)
+### 5. Routing 模块 (src/routing/)
 
-#### KLayoutExecutor
+#### pin_extractor
 
-**输入：**
-- GDS 文件路径
-- `MappedGeometry` 列表
+从 GDS 的子 cell 中提取 PIN marker (255/0) 文本标签，结合 instance 变换计算全局坐标。
 
-**输出：**
-- 更新的 GDS 文件
-- `ExecutionResult`: {success, updated_cells, errors}
-
-**逻辑：**
-1. 打开 GDS 文件
-2. 定位目标 Cell
-3. 调用 PCell 更新参数
-4. 调用 StretchRouter 维护连线
-5. 保存 GDS
-
-**依赖：** `klayout.db`
-
----
-
-### 6. Routing 模块 (src/routing/)
-
-#### WireFinder
-
-**输入：**
-- GDS 版图数据
-- 连接关系（从网表获取）
-
-**输出：** `Connection` 列表
 ```python
-Connection:
-  pin1: PinState
-  pin2: PinState
-  wire: WireGeometry
+extract_pin_positions(layout, top_cell) → {ref: {pin_name: (x_um, y_um)}}
+extract_pin_layers(layout, top_cell)    → {ref: {pin_name: (layer, datatype)}}
+```
+
+#### wire_extractor
+
+从 top cell 的金属层形状中提取连线，按网络名分组。
+
+```python
+extract_wires_from_gds(layout, top_cell, nets) → {net_name: [WireSegment]}
+erase_wires_from_top_cell(layout, top_cell, nets_to_erase, wires)
+```
+
+#### initial_router
+
+根据引脚位置和网表连接关系生成新连线。
+
+```python
+route_connection(pin_a, pin_b)     → [WireSegment]  # 直连或L型
+route_affected_nets(...)           → {net_name: [WireSegment]}
+draw_wire_segments(cell, layout, wires)
+erase_wire_segments(cell, layout, wires)
 ```
 
 ---
 
-#### StretchRouter
-
-**输入：**
-- 旧引脚位置
-- 新引脚位置
-- 原有连线
-
-**输出：** 拉伸后的连线
-
-**逻辑：**
-1. 计算引脚位移
-2. 擦除旧连线
-3. 绘制新连线（L型或直线）
-
----
-
-### 7. Validator 模块 (src/validator/)
+### 6. Validator 模块 (src/validator/)
 
 #### DRCRunner
 
-**输入：** GDS 文件
-
-**输出：** DRC 报告（违例数量、错误、警告）
-
 **规则文件：** `config/drc_rules/simple_rf.yaml`
 
----
+**自动重试：** DRC 失败时缩小参数 0.9x 重试，最多 3 次。
 
 #### KLayoutPureLVS
 
-**输入：**
-- GDS 版图
-- 网表
-
-**输出：** LVS 结果 {match: bool, errors: list}
-
-**逻辑：**
-1. 提取版图连通性
-2. 与网表对比
-3. 报告不匹配
+通过 PIN marker 引脚坐标和金属层连通性验证版图与原理图的一致性。
 
 ---
 
-### 8. State 模块 (state/)
+### 7. State 模块 (state/)
 
-#### SnapshotManager
+#### GDSBackupManager
 
-**输入：** 运行参数快照
+仅负责 GDS 文件的备份和回滚，不存储任何快照数据。
 
-**输出：** `ParamsSnapshot` 文件
-
-```json
-{
-  "gds_path": "output.gds",
-  "timestamp": "2026-05-14T10:30:00",
-  "devices": {
-    "C1": {
-      "ref": "C1",
-      "pcell_type": "CAP_MIM",
-      "params": {"length": 57, "width": 57},
-      "pins": {
-        "PI": {"name": "PI", "x": 57.0, "y": 28.5},
-        "NIN": {"name": "NIN", "x": 57.0, "y": 4.5}
-      }
-    }
-  }
-}
+```python
+save_backup(gds_path)     → Optional[Path]  # 保存备份
+restore_backup(backup, target) → bool        # 恢复备份
 ```
 
 ---
@@ -301,7 +257,7 @@ Connection:
 |------|------|------|
 | Python | ≥3.10 | 运行环境 |
 | klayout | ≥0.28 | GDS 操作、PCell API |
-| sexpdata | ≥1.0.0 | 解析 KiCad 网表（S-expression） |
+| sexpdata | ≥1.0 | 解析 KiCad 网表（S-expression） |
 | PyYAML | ≥6.0 | 读取映射规则配置 |
 
 ---
@@ -309,18 +265,22 @@ Connection:
 ## 数据流总结
 
 ```
-网表(.net) ──┐
-              ├──> Parser ──> Mapper ──> PCells ──> Executor ──> GDS
-参数(.json) ─┘                 │
-                                ├──> Routing(StretchRouter) ──> 连线维护
-                                │
-映射规则 ────────────────────────┘
-                                                 │
-                                        ┌────────┴────────┐
-                                        ▼                 ▼
-                                     Validator          State
-                                    (DRC/LVS)      (Snapshot)
-                                        │                 │
-                                        ▼                 ▼
-                                     报告              快照.json
+原始网表 ──┐
+            ├──> diff_netlists ──> parse_value ──> MappingEngine ──> PCells
+修改后网表─┘                                                       │
+                                                                    ▼
+GDS ──> pin_extractor ─────────────────────────────────────> _update_layout
+GDS ──> wire_extractor ────────────────────────────────────> _update_layout
+                                                            │
+                                          ┌─────────────────┼─────────────────┐
+                                          ▼                 ▼                 ▼
+                                     替换器件          擦除+重布线        Validator
+                                    (PCell.generate)  (InitialRouter)    (DRC/LVS)
+                                          │                 │                 │
+                                          └────────┬────────┘                 │
+                                                   ▼                          │
+                                              输出 GDS ◄──── 回滚(GDSBackup)
+                                                   │
+                                                   ▼
+                                              历史记录
 ```
