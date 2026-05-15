@@ -134,7 +134,18 @@ class SpiralInductor(BasePCell):
         返回: [(x1, y1, x2, y2, direction), ...]
         direction: "H" 水平, "V" 垂直
 
-        绘制顺序：从内圈开始，每圈顶→右→底→左
+        连通性保证：每条线段的终点=下一条线段的起点（中心线连续），
+        相邻线段的矩形在转角处自动重叠，保证电气连通。
+
+        关键规则：
+            - 每圈底边水平延伸到下一圈left_x（非本圈），形成L型过渡
+            - 每圈左边竖线从上一圈bottom_y开始（非本圈bottom_y），避免与本圈底边短路
+            - 最外圈底边回到本圈left_x（无下一圈）
+
+        路径（turns=3为例）：
+            Turn0: 左↑ → 顶→ → 右↓ → 底←(延伸到Turn1 left_x)
+            Turn1: 左↑(从Turn0 bottom_y) → 顶→ → 右↓ → 底←(延伸到Turn2 left_x)
+            Turn2: 左↑(从Turn1 bottom_y) → 顶→ → 右↓ → 底←(本圈left_x)
         """
         segments = []
         half_w = w / 2.0
@@ -143,46 +154,57 @@ class SpiralInductor(BasePCell):
 
         for turn in range(full_turns):
             off = turn * (w + s)
+            next_off = (turn + 1) * (w + s)
 
-            # 当前圈的四边中心线坐标
+            # 当前圈各边中心线坐标
             top_y = ir + off + half_w
             right_x = ir + off + half_w
             bottom_y = -(ir + off + half_w)
             left_x = -(ir + off + half_w)
 
-            shrink = w + s  # 螺旋内缩量
-
-            # 顶边：水平向右
-            if turn == 0:
-                x_start = -right_x  # 第一圈：完整顶边
+            # 下一圈left_x（底边延伸目标）
+            if turn < full_turns - 1 or has_half:
+                next_left_x = -(ir + next_off + half_w)
             else:
-                x_start = left_x + shrink  # 后续圈：从左边终点向右偏移
-            segments.append((x_start, top_y, right_x, top_y, "H"))
+                next_left_x = left_x  # 最外圈：底边回到本圈left_x
 
-            # 右边：垂直向下
+            # 上一圈bottom_y（左边竖线起点y）
+            if turn == 0:
+                prev_bottom_y = 0.0  # 第一圈：从中心高度开始（Underpass连接点）
+            else:
+                prev_off = (turn - 1) * (w + s)
+                prev_bottom_y = -(ir + prev_off + half_w)
+
+            # 左竖线：从上一圈bottom_y到本圈top_y
+            segments.append((left_x, prev_bottom_y, left_x, top_y, "V"))
+
+            # 顶横线：从左到右
+            segments.append((left_x, top_y, right_x, top_y, "H"))
+
+            # 右竖线：从顶到底
             segments.append((right_x, top_y, right_x, bottom_y, "V"))
 
-            # 底边：水平向左（内缩）
-            segments.append((right_x, bottom_y, left_x + shrink, bottom_y, "H"))
+            # 底横线：从右到下一圈left_x（延伸过渡）
+            segments.append((right_x, bottom_y, next_left_x, bottom_y, "H"))
 
-            # 左边：垂直向上→连接下一圈
-            next_top_y = ir + (turn + 1) * (w + s) + half_w
-            segments.append((left_x, bottom_y, left_x, next_top_y, "V"))
-
-        # 半圈：只有顶边
+        # 半圈：左竖线 + 顶横线
         if has_half:
             off = full_turns * (w + s)
             top_y = ir + off + half_w
             right_x = ir + off + half_w
+            left_x = -(ir + off + half_w)
 
-            # 左边终点就是半圈顶边的起点
+            # 上一圈bottom_y
             if full_turns > 0:
-                prev_left_x = -(ir + (full_turns - 1) * (w + s) + half_w)
-                x_start = prev_left_x
+                prev_off = (full_turns - 1) * (w + s)
+                prev_bottom_y = -(ir + prev_off + half_w)
             else:
-                x_start = -right_x
+                prev_bottom_y = 0.0
 
-            segments.append((x_start, top_y, right_x, top_y, "H"))
+            # 左竖线
+            segments.append((left_x, prev_bottom_y, left_x, top_y, "V"))
+            # 顶横线
+            segments.append((left_x, top_y, right_x, top_y, "H"))
 
         return segments
 
