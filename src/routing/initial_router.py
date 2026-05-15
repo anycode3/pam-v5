@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # 默认连线参数
 DEFAULT_WIRE_WIDTH = 10.0  # um
 DEFAULT_WIRE_LAYER = (6, 0)  # METAL_UNDER，通用走线层
+# 共线判断公差：水平/垂直误差小于 wire_width/2 时视为共线
+COLINEAR_TOLERANCE = DEFAULT_WIRE_WIDTH / 2.0  # 5.0 um
 
 
 def route_connection(
@@ -55,8 +57,8 @@ def route_connection(
     dx = abs(bx - ax)
     dy = abs(by - ay)
 
-    if dx < 0.01 or dy < 0.01:
-        # 直线连接
+    if dx < COLINEAR_TOLERANCE or dy < COLINEAR_TOLERANCE:
+        # 直线连接（误差小于线宽一半时视为共线）
         return [WireSegment(
             layer=wire_layer,
             points=[(ax, ay), (bx, by)],
@@ -353,9 +355,18 @@ class InitialRouter:
     def _find_instance_transform(
         self, layout: db.Layout, top_cell: db.Cell, ref: str
     ) -> Optional[db.DCplxTrans]:
-        """查找 ref 对应的 instance 变换。"""
+        """查找 ref 对应的 instance 变换。
+
+        Cell 命名格式为 ref_pcell_name（如 C1_CAP_MIM）。
+        用精确匹配避免 C1 错误匹配 C10。
+        """
         for inst in top_cell.each_inst():
             cell = inst.cell
-            if cell.name.startswith(f"{ref}_") or cell.name == ref:
+            if cell.name == ref:
                 return inst.dcplx_trans
+            # 避免 C1 错误匹配 C10：检查下划线后第一位不是数字
+            if cell.name.startswith(f"{ref}_"):
+                suffix = cell.name[len(ref) + 1:]
+                if suffix and not suffix[0].isdigit():
+                    return inst.dcplx_trans
         return None

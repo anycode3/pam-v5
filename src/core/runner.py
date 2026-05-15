@@ -518,14 +518,22 @@ class Runner:
     def _find_cell_by_reference(
         self, layout: db.Layout, reference: str
     ) -> Optional[db.Cell]:
-        """按 reference 定位 Cell。"""
+        """按 reference 定位 Cell。
+
+        Cell 命名格式为 ref_pcell_name（如 C1_CAP_MIM）。
+        用精确匹配避免 C1 错误匹配 C10。
+        """
         top_cell = layout.top_cell()
         if top_cell is None:
             return None
         for inst in top_cell.each_inst():
             cell = inst.cell
-            if cell.name == reference or cell.name.startswith(f"{reference}_"):
+            if cell.name == reference:
                 return cell
+            if cell.name.startswith(f"{reference}_"):
+                suffix = cell.name[len(reference) + 1:]
+                if suffix and not suffix[0].isdigit():
+                    return cell
         return None
 
     def _append_history(

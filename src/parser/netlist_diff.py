@@ -26,7 +26,8 @@ class DeviceDiff:
 class NetlistDiffResult:
     """网表差异结果。"""
     changed: List[DeviceDiff] = field(default_factory=list)  # 值变化的器件
-    errors: List[str] = field(default_factory=list)          # 错误（如器件增减）
+    warnings: List[str] = field(default_factory=list)        # 警告（如类型名变更）
+    errors: List[str] = field(default_factory=list)         # 错误（如器件增减）
 
     @property
     def has_changes(self) -> bool:
@@ -67,12 +68,12 @@ def diff_netlists(
         orig = orig_by_ref[ref]
         mod = mod_by_ref[ref]
 
-        # 检查器件类型是否变化
+        # 检查器件类型是否变化（降为警告，不阻断执行）
         if orig.name != mod.name:
-            result.errors.append(
-                f"器件 {ref} 类型变更（暂不支持）: {orig.name} → {mod.name}"
+            result.warnings.append(
+                f"器件 {ref} 类型名称变更: {orig.name} → {mod.name}"
             )
-            continue
+            continue  # 类型变化时跳过值比较
 
         if orig.value != mod.value:
             result.changed.append(DeviceDiff(

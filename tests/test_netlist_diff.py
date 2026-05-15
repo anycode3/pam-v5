@@ -75,13 +75,15 @@ class TestDiffNetlistsValueChanged:
 
 
 class TestDiffNetlistsPartNameChange:
-    """器件类型变更（不支持，应报错）。"""
+    """器件类型名称变更（降为警告，不阻断执行）。"""
 
     def test_part_name_changed(self):
         orig = [_make_comp("C1", "CAP_MIM", "1pF")]
         mod = [_make_comp("C1", "IND_SPIRAL", "1nH")]
         result = diff_netlists(orig, mod)
-        assert any("类型变更" in e for e in result.errors)
+        # 类型名变更 → warning，不在 errors 中
+        assert any("类型名称变更" in w for w in result.warnings)
+        assert not result.errors
         # 不应记录为 value 变化
         assert not result.has_changes
 
@@ -92,6 +94,7 @@ class TestDiffNetlistsPartNameChange:
         result = diff_netlists(orig, mod)
         assert result.has_changes
         assert not result.errors
+        assert not result.warnings
 
 
 class TestDiffNetlistsDeviceAddRemove:

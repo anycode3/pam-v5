@@ -18,6 +18,9 @@ from .pin_extractor import extract_pin_positions, PIN_MARKER_LAYER
 
 logger = logging.getLogger(__name__)
 
+# 未接触引脚的 shape 归属最近网络的距离阈值 (μm)
+NEAREST_NET_DISTANCE_THRESHOLD_UM = 20.0
+
 
 def extract_wires_from_gds(
     layout: db.Layout,
@@ -231,7 +234,8 @@ def _find_nearest_net(
                 if key in pin_to_net:
                     nearest_net = pin_to_net[key]
 
-    # 只在距离足够近时才归属（20um 内）
-    if min_dist < 400:  # 20^2
+    # 只在距离足够近时才归属（阈值内）
+    threshold_sq = NEAREST_NET_DISTANCE_THRESHOLD_UM ** 2
+    if min_dist < threshold_sq:
         return nearest_net
     return None
