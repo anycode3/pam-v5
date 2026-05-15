@@ -1,4 +1,9 @@
-"""带约束的映射引擎：电气值 → 几何参数，含边界过滤。"""
+"""带约束的映射引擎：电气值 → 几何参数。
+
+约束结果同时传递给：
+- MappingEngine._check_constraints：warning 级别（不阻断）
+- PCell.validate_params：error 级别（由调用方决定是否阻断）
+"""
 
 from __future__ import annotations
 
@@ -17,7 +22,8 @@ class MappedGeometry:
     reference: str            # 器件reference
     target_pcell: str         # 对应PCell名
     geometry_params: dict     # 几何参数，如 {"length": 57, "width": 57}
-    warnings: list[str] = field(default_factory=list)
+    constraints: dict = field(default_factory=dict)  # 约束边界，PCell 做 error 级别检查
+    warnings: list[str] = field(default_factory=list)  # 警告信息（约束超限提示，不阻断）
 
 
 class MappingEngine:
@@ -66,13 +72,14 @@ class MappingEngine:
             if k not in geometry:
                 geometry[k] = v
 
-        # 约束过滤
+        # 约束超限检查（warning 级别，不阻断）
         warnings = self._check_constraints(geometry, constraints)
 
         return MappedGeometry(
             reference=target.reference,
             target_pcell=target_pcell,
             geometry_params=geometry,
+            constraints=constraints,
             warnings=warnings,
         )
 

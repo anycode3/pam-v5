@@ -57,7 +57,7 @@ class RunConfig:
     gds_path: str                  # 输入GDS
     netlist_path: str              # 原始网表
     modified_netlist_path: str     # 修改后网表
-    mapping_rules_path: str        # 映射规则YAML
+    pdk_config_path: str        # PDK 配置文件路径
     output_path: str = "output.gds"
     state_dir: str = "state"
     history_path: Optional[str] = "state/history.jsonl"
@@ -90,7 +90,7 @@ class Runner:
     def __init__(self, config: RunConfig):
         self._config = config
         self._netlist_parser = KiCadNetlistParser()
-        self._mapper = MappingEngine(config.mapping_rules_path)
+        self._mapper = MappingEngine(config.pdk_config_path)
         self._router = InitialRouter()
         self._backup_mgr = GDSBackupManager(config.state_dir)
         if config.drc_enabled:
@@ -324,10 +324,13 @@ class Runner:
                     continue
 
                 pcell = get_pcell(mg.target_pcell)
-                valid, param_errors = pcell.validate_params(mg.geometry_params)
+                valid, param_errors = pcell.validate_params(mg.geometry_params, mg.constraints)
                 if not valid:
                     for e in param_errors:
-                        logger.warning(f"参数校验 [{mg.reference}]: {e}")
+                        err_msg = f"参数校验失败 [{mg.reference}]: {e}"
+                        all_errors.append(err_msg)
+                        logger.error(err_msg)
+                    continue  # 参数无效，跳过该器件的更新
 
                 target_cell.clear()
                 pcell.generate(target_cell, mg.geometry_params)

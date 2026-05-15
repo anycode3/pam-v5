@@ -18,7 +18,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         gds_path=args.gds,
         netlist_path=args.netlist,
         modified_netlist_path=args.modified_netlist,
-        mapping_rules_path=args.rules,
+        pdk_config_path=args.pdk_config,
         output_path=args.output,
         state_dir=args.state_dir,
         history_path=args.history,
@@ -56,7 +56,7 @@ def main() -> None:
     p_run.add_argument("--gds", required=True, help="输入GDS文件路径")
     p_run.add_argument("--netlist", required=True, help="原始KiCad网表文件路径")
     p_run.add_argument("--modified-netlist", required=True, help="修改后KiCad网表文件路径")
-    p_run.add_argument("--rules", default="config/mapping_rules.yaml", help="映射规则YAML路径")
+    p_run.add_argument("--pdk-config", default="config/mapping_rules.yaml", help="PDK 配置文件路径")
     p_run.add_argument("--output", default="output.gds", help="输出GDS文件路径")
     p_run.add_argument("--state-dir", default="state", help="状态目录")
     p_run.add_argument("--history", default="state/history.jsonl", help="历史记录文件路径")

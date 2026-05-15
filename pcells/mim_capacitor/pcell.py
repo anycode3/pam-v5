@@ -137,16 +137,33 @@ class MIMCapacitor(BasePCell):
         for pin_name, pin_pos in pins.items():
             self._draw_pin_marker(cell, pin_name, pin_pos.x, pin_pos.y)
 
-    def validate_params(self, params: dict) -> Tuple[bool, List[str]]:
-        """参数边界检查。"""
-        errors = []
-        length = params.get("length", 0)
-        width = params.get("width", 0)
+    def validate_params(self, params: dict, constraints: dict = None) -> Tuple[bool, List[str]]:
+        """参数边界检查。
 
-        if length < 10 or length > 200:
-            errors.append(f"length={length} 超出范围 [10, 200] um")
-        if width < 10 or width > 200:
-            errors.append(f"width={width} 超出范围 [10, 200] um")
+        Args:
+            params: 待检查的几何参数
+            constraints: 约束边界，格式 {param: {min, max}}。
+                        如果为 None 或某参数无约束，则该项不检查。
+
+        Returns:
+            (is_valid, error_messages)
+        """
+        if constraints is None:
+            constraints = {}
+
+        errors = []
+
+        for param_name in ["length", "width"]:
+            value = params.get(param_name)
+            if value is None:
+                continue
+            bounds = constraints.get(param_name, {})
+            min_val = bounds.get("min")
+            max_val = bounds.get("max")
+            if min_val is not None and value < min_val:
+                errors.append(f"{param_name}={value} 低于下限 {min_val}")
+            if max_val is not None and value > max_val:
+                errors.append(f"{param_name}={value} 超过上限 {max_val}")
 
         return len(errors) == 0, errors
 

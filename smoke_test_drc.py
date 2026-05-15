@@ -196,7 +196,7 @@ def test_runner_with_drc_pass():
         gds_path="state/snapshots/runner_drc_initial.gds",
         netlist_path="examples/l_match.net",
         target_params_path="state/snapshots/runner_drc_target.json",
-        mapping_rules_path="config/mapping_rules.yaml",
+        pdk_config_path="config/mapping_rules.yaml",
         output_path="state/snapshots/runner_drc_output.gds",
         drc_enabled=True,
         drc_rules_path="config/drc_rules/simple_rf.yaml",

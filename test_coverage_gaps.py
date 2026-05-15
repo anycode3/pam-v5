@@ -308,7 +308,7 @@ class TestRunnerErrors:
             gds_path=str(tmp_path / "dummy.gds"),
             netlist_path=str(tmp_path / "nonexistent.net"),
             modified_netlist_path=str(tmp_path / "mod.net"),
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
             drc_enabled=False,
         )
         runner = Runner(config)
@@ -336,7 +336,7 @@ class TestRunnerErrors:
             gds_path=str(tmp_path / "dummy.gds"),
             netlist_path=str(netlist_path),
             modified_netlist_path=str(tmp_path / "nonexistent_mod.net"),
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
             drc_enabled=False,
         )
         runner = Runner(config)

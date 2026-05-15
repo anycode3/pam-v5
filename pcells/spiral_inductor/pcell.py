@@ -268,22 +268,33 @@ class SpiralInductor(BasePCell):
         else:
             cell.shapes(layer).insert(box)
 
-    def validate_params(self, params: dict) -> Tuple[bool, List[str]]:
-        """参数边界检查。"""
-        errors = []
-        ir = params.get("inner_radius", 0)
-        n = params.get("turns", 0)
-        w = params.get("width", 0)
-        s = params.get("spacing", 0)
+    def validate_params(self, params: dict, constraints: dict = None) -> Tuple[bool, List[str]]:
+        """参数边界检查。
 
-        if ir < 20 or ir > 80:
-            errors.append(f"inner_radius={ir} 超出范围 [20, 80] um")
-        if n < 1.5 or n > 6.5:
-            errors.append(f"turns={n} 超出范围 [1.5, 6.5]")
-        if w < 5 or w > 20:
-            errors.append(f"width={w} 超出范围 [5, 20] um")
-        if s < 5 or s > 15:
-            errors.append(f"spacing={s} 超出范围 [5, 15] um")
+        Args:
+            params: 待检查的几何参数
+            constraints: 约束边界，格式 {param: {min, max}}。
+                        如果为 None 或某参数无约束，则该项不检查。
+
+        Returns:
+            (is_valid, error_messages)
+        """
+        if constraints is None:
+            constraints = {}
+
+        errors = []
+
+        for param_name in ["inner_radius", "turns", "width", "spacing"]:
+            value = params.get(param_name)
+            if value is None:
+                continue
+            bounds = constraints.get(param_name, {})
+            min_val = bounds.get("min")
+            max_val = bounds.get("max")
+            if min_val is not None and value < min_val:
+                errors.append(f"{param_name}={value} 低于下限 {min_val}")
+            if max_val is not None and value > max_val:
+                errors.append(f"{param_name}={value} 超过上限 {max_val}")
 
         return len(errors) == 0, errors
 

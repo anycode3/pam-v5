@@ -43,7 +43,7 @@ class TestRunConfig:
             gds_path="input.gds",
             netlist_path="orig.net",
             modified_netlist_path="mod.net",
-            mapping_rules_path="rules.yaml",
+            pdk_config_path="rules.yaml",
         )
         assert config.output_path == "output.gds"
         assert config.state_dir == "state"
@@ -57,7 +57,7 @@ class TestRunConfig:
             gds_path="a.gds",
             netlist_path="b.net",
             modified_netlist_path="c.net",
-            mapping_rules_path="d.yaml",
+            pdk_config_path="d.yaml",
             output_path="out.gds",
             state_dir="custom_state",
             drc_enabled=False,
@@ -89,7 +89,7 @@ class TestRunnerConstruction:
             gds_path="test.gds",
             netlist_path="orig.net",
             modified_netlist_path="mod.net",
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
             drc_enabled=True,
         )
         runner = Runner(config)
@@ -101,7 +101,7 @@ class TestRunnerConstruction:
             gds_path="test.gds",
             netlist_path="orig.net",
             modified_netlist_path="mod.net",
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
             drc_enabled=False,
             lvs_enabled=True,
         )
@@ -114,7 +114,7 @@ class TestRunnerConstruction:
             gds_path="test.gds",
             netlist_path="orig.net",
             modified_netlist_path="mod.net",
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
         )
         runner = Runner(config)
         assert runner._backup_mgr is not None
@@ -128,7 +128,7 @@ class TestRunnerHelperMethods:
             gds_path="test.gds",
             netlist_path="orig.net",
             modified_netlist_path="mod.net",
-            mapping_rules_path="config/mapping_rules.yaml",
+            pdk_config_path="config/mapping_rules.yaml",
         )
         return Runner(config)
 

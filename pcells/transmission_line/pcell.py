@@ -116,17 +116,36 @@ class TransmissionLine(BasePCell):
         for pin_name, pin_pos in pins.items():
             self._draw_pin_marker(cell, pin_name, pin_pos.x, pin_pos.y)
 
-    def validate_params(self, params: dict) -> Tuple[bool, List[str]]:
-        """参数边界检查。"""
-        errors = []
-        w = params.get("width", 0)
-        l = params.get("length", 0)
-        angle = params.get("angle", 0)
+    def validate_params(self, params: dict, constraints: dict = None) -> Tuple[bool, List[str]]:
+        """参数边界检查。
 
-        if w < 5 or w > 200:
-            errors.append(f"width={w} 超出范围 [5, 200] um")
-        if l < 50 or l > 5000:
-            errors.append(f"length={l} 超出范围 [50, 5000] um")
+        Args:
+            params: 待检查的几何参数
+            constraints: 约束边界，格式 {param: {min, max}}。
+                        如果为 None 或某参数无约束，则该项不检查。
+
+        Returns:
+            (is_valid, error_messages)
+        """
+        if constraints is None:
+            constraints = {}
+
+        errors = []
+
+        for param_name in ["width", "length"]:
+            value = params.get(param_name)
+            if value is None:
+                continue
+            bounds = constraints.get(param_name, {})
+            min_val = bounds.get("min")
+            max_val = bounds.get("max")
+            if min_val is not None and value < min_val:
+                errors.append(f"{param_name}={value} 低于下限 {min_val}")
+            if max_val is not None and value > max_val:
+                errors.append(f"{param_name}={value} 超过上限 {max_val}")
+
+        # angle 来自 YAML defaults，不从 constraints 检查，是固定的几何合法性校验
+        angle = params.get("angle", 0)
         if angle < 0 or angle >= 360:
             errors.append(f"angle={angle} 超出范围 [0, 360) deg")
 

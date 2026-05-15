@@ -34,7 +34,7 @@ from src.routing.initial_router import InitialRouter, draw_wire_segments
 def generate_initial_gds(
     netlist_path: str,
     output_path: str,
-    mapping_rules_path: str = "config/mapping_rules.yaml",
+    pdk_config_path: str = "config/mapping_rules.yaml",
     wire_width: float = 10.0,
 ) -> None:
     """从网表生成初始 GDS。
@@ -42,7 +42,7 @@ def generate_initial_gds(
     Args:
         netlist_path: KiCad 网表文件路径
         output_path: 输出 GDS 文件路径
-        mapping_rules_path: 映射规则 YAML 路径
+        pdk_config_path: PDK 配置文件路径
         wire_width: 连线宽度 (um)
     """
     # 解析网表
@@ -51,7 +51,7 @@ def generate_initial_gds(
     print(f"解析网表: {len(components)} 器件, {len(nets)} 网络")
 
     # 映射引擎
-    mapper = MappingEngine(mapping_rules_path)
+    mapper = MappingEngine(pdk_config_path)
 
     # 构建 ref → pcell/params 映射
     ref_to_pcell: dict = {}
@@ -149,9 +149,9 @@ def main() -> None:
     parser.add_argument("netlist", help="KiCad 网表文件路径")
     parser.add_argument("output", help="输出 GDS 文件路径")
     parser.add_argument(
-        "--rules",
+        "--pdk-config",
         default="config/mapping_rules.yaml",
-        help="映射规则 YAML 路径 (默认: config/mapping_rules.yaml)",
+        help="PDK 配置文件路径 (默认: config/mapping_rules.yaml)",
     )
     parser.add_argument(
         "--wire-width",
@@ -170,7 +170,7 @@ def main() -> None:
     generate_initial_gds(
         netlist_path=args.netlist,
         output_path=args.output,
-        mapping_rules_path=args.rules,
+        pdk_config_path=args.pdk_config,
         wire_width=args.wire_width,
     )
 

@@ -69,14 +69,16 @@ class BasePCell(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def validate_params(self, params: dict) -> Tuple[bool, List[str]]:
-        """参数边界检查（与mapping_rules.yaml约束对齐）。
+    def validate_params(self, params: dict, constraints: dict = None) -> Tuple[bool, List[str]]:
+        """参数边界检查。
 
         Args:
-            params: 待检查的参数
+            params: 待检查的几何参数
+            constraints: 约束边界，格式为 {param_name: {min: float, max: float}}。
+                        如果为 None 或某个参数无约束，则该项不检查，直接通过。
 
         Returns:
-            (is_valid, error_messages)
+            (is_valid, error_messages)。如果 constraints 为 None，则直接返回 (True, [])
         """
         ...
 
