@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import logging
 import shutil
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import klayout.db as db
+
+# ExecutionResult 已迁移到 runner.py，此处保留兼容别名
+from src.core.runner import ExecutionResult  # noqa: F401
 
 from src.mapper.engine import MappedGeometry
 from pcells.base import BasePCell, PinPosition
@@ -22,16 +24,6 @@ from src.routing.types import PinState, Connection, StretchResult
 from src.routing.wire_finder import WireFinder
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ExecutionResult:
-    """执行结果。"""
-    success: bool
-    updated_cells: list[str]     # 成功更新的PCell实例reference
-    stretch_result: Optional[StretchResult] = None
-    output_path: Optional[str] = None
-    errors: list[str] = field(default_factory=list)
 
 
 class KLayoutExecutor:

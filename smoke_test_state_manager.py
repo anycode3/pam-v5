@@ -1,5 +1,9 @@
 """StateManager 参数快照系统端到端集成测试。
 
+DEPRECATED: 此测试基于旧的快照流程，已被 GDS 实时提取取代。
+快照管理器已简化为 GDSBackupManager，仅处理 GDS 文件备份/回滚。
+新流程的测试见 tests/ 目录。
+
 测试完整流程:
   1. init: 从初始参数生成初版GDS + params_snapshot.json
   2. 第1次迭代: 小调整，验证快照写入

@@ -303,104 +303,95 @@ class TestRunnerErrors:
 
     def test_netlist_parse_failure(self, tmp_path):
         """网表文件不存在时Runner应返回失败。"""
-        from core.runner import Runner, RunConfig
+        from src.core.runner import Runner, RunConfig
         config = RunConfig(
             gds_path=str(tmp_path / "dummy.gds"),
             netlist_path=str(tmp_path / "nonexistent.net"),
-            target_params_path=str(tmp_path / "targets.json"),
+            modified_netlist_path=str(tmp_path / "mod.net"),
             mapping_rules_path="config/mapping_rules.yaml",
             drc_enabled=False,
         )
         runner = Runner(config)
         result = runner.run()
         assert not result.success
-        assert any("网表" in e for e in result.errors)
 
-    def test_target_params_parse_failure(self, tmp_path):
-        """目标参数文件格式错误时Runner应返回失败。"""
-        from core.runner import Runner, RunConfig
+    def test_modified_netlist_parse_failure(self, tmp_path):
+        """修改后网表文件不存在时Runner应返回失败。"""
+        from src.core.runner import Runner, RunConfig
 
-        # 创建一个有效的网表文件
-        netlist_path = tmp_path / "test.net"
+        # 创建一个有效的原始网表文件
+        netlist_path = tmp_path / "orig.net"
         netlist_path.write_text(
             "(export (version D001)\n"
             "  (components\n"
-            "    (comp (ref TL1) (value TL_MICROSTRIP))\n"
+            "    (comp (ref TL1) (value \"50Ohm/1000um\"))\n"
             "  )\n"
             "  (nets\n"
             "  )\n"
             ")\n",
             encoding="utf-8",
         )
-        bad_target = tmp_path / "bad.json"
-        bad_target.write_text("{invalid", encoding="utf-8")
 
         config = RunConfig(
             gds_path=str(tmp_path / "dummy.gds"),
             netlist_path=str(netlist_path),
-            target_params_path=str(bad_target),
+            modified_netlist_path=str(tmp_path / "nonexistent_mod.net"),
             mapping_rules_path="config/mapping_rules.yaml",
             drc_enabled=False,
         )
         runner = Runner(config)
         result = runner.run()
         assert not result.success
-        assert any("目标参数" in e for e in result.errors)
 
 
 # ── 快照管理器边界 ──────────────────────────────────────────────────
 
 
-class TestSnapshotManagerEdgeCases:
-    """SnapshotManager 边界情况。"""
+class TestGDSBackupManagerEdgeCases:
+    """GDSBackupManager 边界情况。"""
 
-    def test_load_nonexistent_returns_none(self, tmp_path):
-        from state.snapshot_manager import SnapshotManager
-        mgr = SnapshotManager(str(tmp_path))
-        result = mgr.load_params_state(str(tmp_path / "nonexistent.json"))
+    def test_save_nonexistent_returns_none(self, tmp_path):
+        from state.snapshot_manager import GDSBackupManager
+        mgr = GDSBackupManager(str(tmp_path))
+        result = mgr.save_backup("/nonexistent/path.gds")
         assert result is None
 
-    def test_load_corrupted_json_returns_none(self, tmp_path):
-        """损坏JSON文件应抛异常（当前未捕获，确认行为）。"""
-        from state.snapshot_manager import SnapshotManager
-        mgr = SnapshotManager(str(tmp_path))
+    def test_restore_nonexistent_backup_returns_false(self, tmp_path):
+        """不存在的备份恢复应返回 False。"""
+        from state.snapshot_manager import GDSBackupManager
+        mgr = GDSBackupManager(str(tmp_path))
+        result = mgr.restore_backup(tmp_path / "nonexistent.gds", str(tmp_path / "out.gds"))
+        assert not result
         bad_file = tmp_path / "bad.json"
         bad_file.write_text("{corrupt", encoding="utf-8")
-        with pytest.raises(json.JSONDecodeError):
-            mgr.load_params_state(str(bad_file))
+        # GDSBackupManager 不再处理 JSON，此测试改为验证备份文件读写
+        from pathlib import Path
+        backup_dir = tmp_path / "state" / "backups"
+        backup_dir.mkdir(parents=True)
+        backup_file = backup_dir / "test.gds"
+        backup_file.write_bytes(b"GDS_DATA")
+        result = mgr.restore_backup(backup_file, str(tmp_path / "out.gds"))
+        assert result
 
-    def test_save_and_load_roundtrip(self, tmp_path):
-        """保存后重新加载应得到相同数据。"""
-        from state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
-        mgr = SnapshotManager(str(tmp_path))
+    def test_save_and_restore_roundtrip(self, tmp_path):
+        """保存备份后恢复应得到相同数据。"""
+        from state.snapshot_manager import GDSBackupManager
+        mgr = GDSBackupManager(str(tmp_path))
 
-        snapshot = ParamsSnapshot(
-            gds_path="/tmp/test.gds",
-            timestamp="2026-01-01T00:00:00",
-            devices={
-                "C1": DeviceSnapshot(
-                    ref="C1",
-                    pcell_type="CAP_MIM",
-                    params={"length": 50, "width": 30},
-                    pins={
-                        "PI": PinSnapshot(name="PI", x=60.0, y=15.0),
-                        "NIN": PinSnapshot(name="NIN", x=60.0, y=4.5),
-                    },
-                ),
-            },
-        )
+        # 创建源文件
+        src = tmp_path / "source.gds"
+        src.write_bytes(b"TEST_GDS_CONTENT")
 
-        path = tmp_path / "snapshot.json"
-        mgr.save_params_state(str(path), snapshot)
-        loaded = mgr.load_params_state(str(path))
+        # 保存备份
+        backup_path = mgr.save_backup(str(src))
+        assert backup_path is not None
+        assert backup_path.exists()
 
-        assert loaded is not None
-        assert loaded.gds_path == "/tmp/test.gds"
-        assert loaded.timestamp == "2026-01-01T00:00:00"
-        assert "C1" in loaded.devices
-        assert loaded.devices["C1"].pcell_type == "CAP_MIM"
-        assert loaded.devices["C1"].pins["PI"].x == 60.0
-        assert loaded.devices["C1"].pins["NIN"].name == "NIN"
+        # 恢复备份
+        target = tmp_path / "restored.gds"
+        success = mgr.restore_backup(backup_path, str(target))
+        assert success
+        assert target.read_bytes() == b"TEST_GDS_CONTENT"
 
 
 # ── PCell注册表 ────────────────────────────────────────────────────

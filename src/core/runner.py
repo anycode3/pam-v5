@@ -1,4 +1,15 @@
-"""核心调度器：协调 parser → mapper → executor → DRC验证 流程。"""
+"""核心调度器：协调 netlist diff → mapper → 器件替换 → 连线重建 → DRC。
+
+流程（无快照依赖，每次 run 完全独立）：
+1. 解析原始网表和修改后网表
+2. Diff 找出值变化的器件
+3. 映射新值为几何参数
+4. 从 GDS 提取旧引脚坐标和旧连线
+5. 替换器件（重新生成 PCell）
+6. 擦除旧连线 + 根据新引脚位置重新布线
+7. DRC 验证（含重试循环）
+8. 记录历史
+"""
 
 from __future__ import annotations
 
@@ -12,39 +23,50 @@ from typing import Dict, List, Optional, Tuple
 
 import klayout.db as db
 
-from src.parser.kicad_netlist import KiCadNetlistParser
-from src.parser.target_params import TargetParamsParser
-from src.mapper.engine import MappingEngine
-from src.executor.klayout_executor import KLayoutExecutor, ExecutionResult
-from src.mapper.engine import MappedGeometry
+from src.parser.kicad_netlist import KiCadNetlistParser, Component
+from src.parser.target_params import TargetParam
+from src.parser.netlist_diff import diff_netlists, NetlistDiffResult, DeviceDiff
+from src.parser.value_parser import parse_value, value_to_device_type
+from src.mapper.engine import MappingEngine, MappedGeometry
 from src.validator.drc_runner import KLayoutDRCRunner
 from src.validator.ref_mapper import ViolationRefMapper
 from src.validator.base import ValidationResult, Severity, LVSResult
 from src.validator.lvs_runner import KLayoutPureLVS
-from state.snapshot_manager import SnapshotManager, ParamsSnapshot, DeviceSnapshot, PinSnapshot
-from src.routing.types import PinState
+from src.routing.initial_router import InitialRouter, WireSegment, draw_wire_segments
+from src.routing.wire_extractor import extract_wires_from_gds, erase_wires_from_top_cell
+from src.routing.pin_extractor import extract_pin_positions, extract_pin_layers
+from state.snapshot_manager import GDSBackupManager
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ExecutionResult:
+    """版图执行结果。"""
+    success: bool
+    updated_cells: list[str]
+    output_path: Optional[str] = None
+    errors: list[str] = field(default_factory=list)
+    # KLayoutExecutor 仍然使用 stretch_result，保留兼容
+    stretch_result: Optional[object] = None  # StretchResult | None
+
+
+@dataclass
 class RunConfig:
     """运行配置。"""
-    gds_path: str                # 输入GDS
-    netlist_path: str            # KiCad网表
-    target_params_path: str      # 目标参数JSON
-    mapping_rules_path: str      # 映射规则YAML
-    output_path: str = "output.gds"  # 输出GDS
-    state_dir: str = "state"         # 状态目录（存快照和参数快照）
-    snapshot_dir: Optional[str] = None  # GDS快照目录（默认state_dir/snapshots）
+    gds_path: str                  # 输入GDS
+    netlist_path: str              # 原始网表
+    modified_netlist_path: str     # 修改后网表
+    mapping_rules_path: str        # 映射规则YAML
+    output_path: str = "output.gds"
+    state_dir: str = "state"
     history_path: Optional[str] = "state/history.jsonl"
-    stretch_threshold_dbu: float = 10000
     # DRC
     drc_enabled: bool = True
     drc_rules_path: str = "config/drc_rules/simple_rf.yaml"
     drc_max_retries: int = 3
-    drc_shrink_factor: float = 0.9  # DRC重试时参数缩小系数
-    # LVS（二期）
+    drc_shrink_factor: float = 0.9
+    # LVS
     lvs_enabled: bool = False
 
 
@@ -52,6 +74,7 @@ class RunConfig:
 class RunResult:
     """运行结果。"""
     success: bool
+    diff_result: Optional[NetlistDiffResult] = None
     mapped_geometries: list[MappedGeometry] = field(default_factory=list)
     execution_result: Optional[ExecutionResult] = None
     drc_result: Optional[ValidationResult] = None
@@ -62,16 +85,14 @@ class RunResult:
 
 
 class Runner:
-    """核心调度器，含DRC验证与重试循环。"""
+    """核心调度器（无快照依赖）。"""
 
     def __init__(self, config: RunConfig):
         self._config = config
         self._netlist_parser = KiCadNetlistParser()
-        self._target_parser = TargetParamsParser()
         self._mapper = MappingEngine(config.mapping_rules_path)
-        self._executor = KLayoutExecutor(
-            stretch_threshold_um=config.stretch_threshold_dbu * 0.001,  # dbu→um
-        )
+        self._router = InitialRouter()
+        self._backup_mgr = GDSBackupManager(config.state_dir)
         if config.drc_enabled:
             self._drc_runner = KLayoutDRCRunner()
         else:
@@ -80,105 +101,101 @@ class Runner:
             self._lvs_runner = KLayoutPureLVS()
         else:
             self._lvs_runner = None
-        self._nets: list = []  # 最近一次解析的网络列表
-        # 状态管理器
-        self._snapshot_mgr = SnapshotManager(config.state_dir)
-        self._params_snapshot_path = Path(config.state_dir) / "params_snapshot.json"
 
     def run(self) -> RunResult:
-        """执行完整流程：解析→映射→执行→DRC验证（含重试循环）。"""
+        """执行完整流程。"""
         start = time.time()
         errors = []
 
-        # 1. 解析网表
-        logger.info(f"解析网表: {self._config.netlist_path}")
+        # 1. 解析原始网表
+        logger.info(f"解析原始网表: {self._config.netlist_path}")
         try:
-            components, self._nets = self._netlist_parser.parse(
+            orig_components, orig_nets = self._netlist_parser.parse(
                 self._config.netlist_path
             )
-            logger.info(f"网表解析完成: {len(components)} 器件, {len(self._nets)} 网络")
+            logger.info(f"原始网表: {len(orig_components)} 器件, {len(orig_nets)} 网络")
         except Exception as e:
-            errors.append(f"网表解析失败: {e}")
-            return RunResult(success=False, errors=errors, duration_s=time.time()-start)
+            errors.append(f"原始网表解析失败: {e}")
+            return RunResult(success=False, errors=errors, duration_s=time.time() - start)
 
-        # 2. 解析目标参数
-        logger.info(f"解析目标参数: {self._config.target_params_path}")
+        # 2. 解析修改后网表
+        logger.info(f"解析修改后网表: {self._config.modified_netlist_path}")
         try:
-            targets = self._target_parser.parse(self._config.target_params_path)
-            logger.info(f"目标参数: {len(targets)} 个器件待更新")
+            mod_components, mod_nets = self._netlist_parser.parse(
+                self._config.modified_netlist_path
+            )
+            logger.info(f"修改后网表: {len(mod_components)} 器件, {len(mod_nets)} 网络")
         except Exception as e:
-            errors.append(f"目标参数解析失败: {e}")
-            return RunResult(success=False, errors=errors, duration_s=time.time()-start)
+            errors.append(f"修改后网表解析失败: {e}")
+            return RunResult(success=False, errors=errors, duration_s=time.time() - start)
 
-        # 3. 映射
-        logger.info("执行电气→几何映射...")
-        mapped = []
-        for t in targets:
-            try:
-                mg = self._mapper.map(t)
-                mapped.append(mg)
-                if mg.warnings:
-                    for w in mg.warnings:
-                        logger.warning(f"约束警告 [{mg.reference}]: {w}")
-                logger.info(f"映射: {mg.reference} → {mg.target_pcell} {mg.geometry_params}")
-            except ValueError as e:
-                errors.append(str(e))
-                logger.error(f"映射失败: {e}")
+        # 3. Diff 网表
+        diff_result = diff_netlists(orig_components, mod_components)
+        if diff_result.errors:
+            errors.extend(diff_result.errors)
+            return RunResult(success=False, diff_result=diff_result, errors=errors, duration_s=time.time() - start)
+        if not diff_result.has_changes:
+            logger.info("网表无变化，无需更新")
+            return RunResult(success=True, diff_result=diff_result, duration_s=time.time() - start)
 
+        logger.info(f"变更器件: {[d.reference for d in diff_result.changed]}")
+
+        # 4. 映射：新 value → 电气参数 → 几何参数
+        mapped = self._map_changed_devices(diff_result.changed)
         if not mapped:
-            errors.append("无有效映射结果")
-            return RunResult(success=False, errors=errors, duration_s=time.time()-start)
+            errors.append("映射失败，无有效结果")
+            return RunResult(success=False, diff_result=diff_result, errors=errors, duration_s=time.time() - start)
 
-        # 4. 加载旧参数快照（为StretchRouter提供old_pin_states）
-        old_params_snapshot = self._snapshot_mgr.load_params_state(self._params_snapshot_path)
-        old_pin_states = self._extract_old_pin_states(old_params_snapshot, mapped)
+        # 5. 构建 ref→pcell/params 映射
+        ref_to_pcell = self._build_pcell_map(orig_components, mapped)
+        ref_to_params = self._build_params_map(orig_components, mapped)
 
-        # 5. 保存GDS快照（回滚用）
-        snapshot_path = self._save_snapshot()
+        # 6. 保存 GDS 备份（回滚用）
+        backup_path = self._backup_mgr.save_backup(self._config.gds_path)
+        if backup_path is None:
+            logger.warning("GDS 备份保存失败，无法回滚")
 
-        # 6. 执行 + DRC重试循环
-        exec_result, drc_result, retries = self._execute_with_drc_loop(
-            mapped, snapshot_path, old_pin_states
+        # 7. 替换器件 + 重建连线
+        exec_result, new_wires = self._update_layout(
+            mapped, ref_to_pcell, ref_to_params,
+            mod_nets, diff_result,
         )
-
         if not exec_result.success:
             errors.extend(exec_result.errors)
 
-        # 7. DRC结果处理
-        if drc_result and not drc_result.passed:
-            if drc_result.has_errors():
+        # 8. DRC 验证
+        drc_result = None
+        retries = 0
+        if self._drc_runner and exec_result.success:
+            drc_result, retries = self._run_drc_with_retry(
+                mapped, backup_path, ref_to_pcell, ref_to_params,
+                mod_nets, diff_result,
+            )
+            if drc_result and not drc_result.passed and drc_result.has_errors():
                 errors.append(
                     f"DRC未通过: {drc_result.error_count()} 错误, "
-                    f"{drc_result.warning_count()} 警告 "
-                    f"(重试{retries}次后仍失败)"
+                    f"{drc_result.warning_count()} 警告 (重试{retries}次)"
                 )
 
-        # 8. LVS验证（DRC成功后执行，失败则回滚不重试）
+        # 9. LVS 验证
         lvs_result = None
         if self._lvs_runner and drc_result and drc_result.passed and exec_result.success:
-            lvs_result = self._run_lvs(mapped, snapshot_path)
+            lvs_result = self._run_lvs(mod_nets, mapped)
             if lvs_result and not lvs_result.passed:
-                errors.append(
-                    f"LVS未通过: {lvs_result.open_count} OPEN, "
-                    f"{lvs_result.short_count} SHORT"
-                )
-                # 回滚输出GDS到快照
-                if snapshot_path and snapshot_path.exists():
-                    shutil.copy2(snapshot_path, self._config.output_path)
+                errors.append(f"LVS未通过: {lvs_result.open_count} OPEN, {lvs_result.short_count} SHORT")
+                if backup_path:
+                    self._backup_mgr.restore_backup(backup_path, self._config.output_path)
                     logger.info("LVS失败，已回滚输出GDS")
 
-        # 9. DRC+LVS都成功时更新参数快照
-        if drc_result and drc_result.passed and exec_result.success and (lvs_result is None or lvs_result.passed):
-            self._save_params_snapshot(mapped, exec_result)
-
         # 10. 记录历史
-        self._append_history(mapped, exec_result, drc_result, errors, retries)
+        self._append_history(diff_result, mapped, exec_result, drc_result, errors, retries)
 
         duration = time.time() - start
         logger.info(f"流程完成: {'成功' if not errors else '有错误'} ({duration:.2f}s)")
 
         return RunResult(
             success=len(errors) == 0,
+            diff_result=diff_result,
             mapped_geometries=mapped,
             execution_result=exec_result,
             drc_result=drc_result,
@@ -188,43 +205,201 @@ class Runner:
             drc_retries=retries,
         )
 
-    def _execute_with_drc_loop(
+    # ── 映射 ──
+
+    def _map_changed_devices(
+        self, changed: List[DeviceDiff]
+    ) -> list[MappedGeometry]:
+        """将变更器件的新 value 映射为几何参数。"""
+        mapped = []
+        for d in changed:
+            try:
+                params = parse_value(d.part_name, d.new_value)
+                device_type = value_to_device_type(d.part_name)
+                target = TargetParam(
+                    reference=d.reference,
+                    device_type=device_type,
+                    params=params,
+                )
+                mg = self._mapper.map(target)
+                mapped.append(mg)
+                logger.info(f"映射: {d.reference} '{d.new_value}' → {mg.target_pcell} {mg.geometry_params}")
+                if mg.warnings:
+                    for w in mg.warnings:
+                        logger.warning(f"约束警告 [{d.reference}]: {w}")
+            except ValueError as e:
+                logger.error(f"映射失败 {d.reference}: {e}")
+        return mapped
+
+    # ── 构建 ref 映射 ──
+
+    def _build_pcell_map(
+        self, components: List[Component], mapped: list[MappedGeometry]
+    ) -> Dict[str, str]:
+        """构建 ref→pcell_name 映射。"""
+        ref_to_pcell: Dict[str, str] = {}
+        # 变更器件从映射结果获取
+        for mg in mapped:
+            ref_to_pcell[mg.reference] = mg.target_pcell
+        # 未变更器件从网表获取（part name = pcell name）
+        for comp in components:
+            if comp.reference not in ref_to_pcell:
+                ref_to_pcell[comp.reference] = comp.name
+        return ref_to_pcell
+
+    def _build_params_map(
+        self, components: List[Component], mapped: list[MappedGeometry]
+    ) -> Dict[str, dict]:
+        """构建 ref→params 映射。
+
+        变更器件用新参数，未变更器件从网表 value 解析原始参数。
+        """
+        ref_to_params: Dict[str, dict] = {}
+        # 变更器件
+        for mg in mapped:
+            ref_to_params[mg.reference] = mg.geometry_params
+        # 未变更器件：从网表 value 解析
+        for comp in components:
+            if comp.reference not in ref_to_params:
+                try:
+                    params = parse_value(comp.name, comp.value)
+                    device_type = value_to_device_type(comp.name)
+                    target = TargetParam(
+                        reference=comp.reference,
+                        device_type=device_type,
+                        params=params,
+                    )
+                    mg = self._mapper.map(target)
+                    ref_to_params[comp.reference] = mg.geometry_params
+                except ValueError:
+                    logger.warning(f"无法解析未变更器件 {comp.reference} 的值: '{comp.value}'")
+        return ref_to_params
+
+    # ── 版图更新 ──
+
+    def _update_layout(
         self,
         mapped: list[MappedGeometry],
-        snapshot_path: Optional[Path],
-        old_pin_states: Optional[Dict[str, PinState]] = None,
-    ) -> tuple[ExecutionResult, Optional[ValidationResult], int]:
-        """执行版图更新 + DRC验证循环。
+        ref_to_pcell: Dict[str, str],
+        ref_to_params: Dict[str, dict],
+        nets: list,
+        diff_result: NetlistDiffResult,
+    ) -> Tuple[ExecutionResult, Dict[str, List[WireSegment]]]:
+        """替换器件 + 重建连线。
 
         Returns:
-            (exec_result, drc_result, retry_count)
+            (ExecutionResult, {net_name: [WireSegment]}) 新连线数据
         """
+        from pcells.registry import get_pcell
+
+        gds_path = Path(self._config.gds_path)
+        output_path = Path(self._config.output_path)
+
+        # 复制输入GDS到输出
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(gds_path, output_path)
+
+        # 加载版图
+        layout = db.Layout()
+        layout.read(str(output_path))
+        top_cell = layout.top_cell()
+
+        if top_cell is None:
+            return ExecutionResult(
+                success=False, updated_cells=[], errors=["无法读取 top cell"]
+            ), {}
+
+        # ── 步骤1: 从 GDS 提取旧连线 ──
+        old_wires = extract_wires_from_gds(layout, top_cell, nets)
+
+        # ── 步骤2: 替换器件 ──
+        updated_cells = []
+        all_errors = []
+
+        for mg in mapped:
+            try:
+                target_cell = self._find_cell_by_reference(layout, mg.reference)
+                if target_cell is None:
+                    all_errors.append(f"未找到器件: {mg.reference}")
+                    continue
+
+                pcell = get_pcell(mg.target_pcell)
+                valid, param_errors = pcell.validate_params(mg.geometry_params)
+                if not valid:
+                    for e in param_errors:
+                        logger.warning(f"参数校验 [{mg.reference}]: {e}")
+
+                target_cell.clear()
+                pcell.generate(target_cell, mg.geometry_params)
+                updated_cells.append(mg.reference)
+                logger.info(f"已更新: {mg.reference} ({mg.target_pcell}) → {mg.geometry_params}")
+
+            except Exception as e:
+                all_errors.append(f"更新失败 {mg.reference}: {e}")
+                logger.error(f"更新失败: {mg.reference}", exc_info=True)
+
+        # ── 步骤3: 擦除受影响网络的旧连线 ──
+        changed_refs = [d.reference for d in diff_result.changed]
+        affected_nets = self._find_affected_nets(nets, changed_refs)
+        if affected_nets and old_wires:
+            erase_wires_from_top_cell(layout, top_cell, affected_nets, old_wires)
+
+        # ── 步骤4: 重新布线 ──
+        new_wires = self._router.route_affected_nets(
+            layout=layout,
+            top_cell=top_cell,
+            nets=nets,
+            changed_refs=changed_refs,
+            ref_to_pcell=ref_to_pcell,
+            ref_to_params=ref_to_params,
+            old_wires=None,  # 已经手动擦除了，不需要 router 再擦
+        )
+
+        # 绘制新连线
+        for net_name, wires in new_wires.items():
+            draw_wire_segments(top_cell, layout, wires)
+            logger.info(f"已绘制连线: {net_name} ({len(wires)} 段)")
+
+        # 保存
+        layout.write(str(output_path))
+        logger.info(f"GDS已保存: {output_path}")
+
+        return ExecutionResult(
+            success=len(all_errors) == 0,
+            updated_cells=updated_cells,
+            output_path=str(output_path),
+            errors=all_errors,
+        ), new_wires
+
+    def _find_affected_nets(
+        self, nets: list, changed_refs: List[str]
+    ) -> List[str]:
+        """找出涉及变更器件的网络名列表。"""
+        changed_set = set(changed_refs)
+        affected = []
+        for net in nets:
+            for ref, _ in net.nodes:
+                if ref in changed_set:
+                    affected.append(net.name)
+                    break
+        return affected
+
+    # ── DRC ──
+
+    def _run_drc_with_retry(
+        self,
+        mapped: list[MappedGeometry],
+        backup_path: Optional[Path],
+        ref_to_pcell: Dict[str, str],
+        ref_to_params: Dict[str, dict],
+        nets: list,
+        diff_result: NetlistDiffResult,
+    ) -> Tuple[Optional[ValidationResult], int]:
+        """DRC 验证 + 重试循环。"""
         max_retries = self._config.drc_max_retries if self._drc_runner else 0
         current_mapped = mapped
 
-        # 构建netlist_nets: {net_name: [(ref, pin_name), ...]}
-        netlist_nets: Dict[str, List] = {}
-        for net in self._nets:
-            netlist_nets[net.name] = net.nodes
-
         for attempt in range(max_retries + 1):
-            # 执行版图更新
-            exec_result = self._executor.execute(
-                gds_path=self._config.gds_path,
-                mapped_geometries=current_mapped,
-                output_path=self._config.output_path,
-                snapshot_dir=None,  # 快照由runner管理
-                netlist_nets=netlist_nets,
-                old_pin_states=old_pin_states,
-            )
-
-            if not exec_result.success:
-                return exec_result, None, attempt
-
-            # DRC验证
-            if self._drc_runner is None:
-                return exec_result, None, 0
-
             drc_result = self._drc_runner.run(
                 gds_path=self._config.output_path,
                 rules_path=self._config.drc_rules_path,
@@ -232,66 +407,53 @@ class Runner:
 
             if drc_result.passed:
                 logger.info(f"DRC通过 (attempt {attempt + 1})")
-                return exec_result, drc_result, attempt
+                return drc_result, attempt
 
-            # DRC失败
-            # 关联违例到器件
+            # DRC 失败
             layout = db.Layout()
             layout.read(self._config.output_path)
             ref_mapper = ViolationRefMapper.from_layout(layout)
             drc_result.violations = ref_mapper.map_violations(drc_result.violations)
 
-            logger.warning(
-                f"DRC失败 (attempt {attempt + 1}/{max_retries + 1}): "
-                f"{drc_result.violation_count} 违例"
-            )
-            for v in drc_result.violations:
-                refs = v.related_refs or []
-                logger.warning(
-                    f"  {v.rule_name}: {v.description} @ ({v.x:.1f},{v.y:.1f}) "
-                    f"refs={refs}"
-                )
+            logger.warning(f"DRC失败 (attempt {attempt + 1}/{max_retries + 1}): {drc_result.violation_count} 违例")
 
-            # 尝试重试
             if attempt < max_retries:
-                # 回滚到修改前
-                if snapshot_path and snapshot_path.exists():
-                    shutil.copy2(snapshot_path, self._config.gds_path)
-                    logger.info(f"已回滚到快照: {snapshot_path}")
+                if backup_path:
+                    self._backup_mgr.restore_backup(backup_path, self._config.output_path)
+                    logger.info("已回滚到备份")
 
-                # 修正参数（缩小违例器件的几何参数）
                 adjusted = self._adjust_for_drc(current_mapped, drc_result)
                 if adjusted == current_mapped:
                     logger.error("无法自动修正DRC违例，停止重试")
-                    return exec_result, drc_result, attempt + 1
+                    return drc_result, attempt + 1
                 current_mapped = adjusted
-            else:
-                # 重试次数用尽，回滚
-                if snapshot_path and snapshot_path.exists():
-                    shutil.copy2(snapshot_path, self._config.output_path)
-                    logger.info("重试次数用尽，已回滚输出GDS")
 
-        return exec_result, drc_result, max_retries
+                retry_exec, _ = self._update_layout(
+                    current_mapped, ref_to_pcell, ref_to_params,
+                    nets, diff_result,
+                )
+                if not retry_exec.success:
+                    logger.error(f"重试布局更新失败: {retry_exec.errors}")
+                    return drc_result, attempt + 1
+            else:
+                if backup_path:
+                    self._backup_mgr.restore_backup(backup_path, self._config.output_path)
+                    logger.info("重试次数用尽，已回滚")
+
+        return drc_result, max_retries
 
     def _adjust_for_drc(
-        self,
-        mapped: list[MappedGeometry],
-        drc_result: ValidationResult,
+        self, mapped: list[MappedGeometry], drc_result: ValidationResult
     ) -> list[MappedGeometry]:
-        """根据DRC违例调整几何参数。
-
-        简化策略：对违例关联的器件，将几何参数按系数缩小。
-        """
-        # 找出有违例的器件
+        """根据DRC违例缩小几何参数。"""
         violated_refs = set()
         for v in drc_result.violations:
             if v.severity == Severity.ERROR and v.related_refs:
                 violated_refs.update(v.related_refs)
 
         if not violated_refs:
-            return mapped  # 无法确定哪个器件有问题
+            return mapped
 
-        # 缩小参数
         factor = self._config.drc_shrink_factor
         adjusted = []
         any_changed = False
@@ -300,16 +462,13 @@ class Runner:
             if mg.reference in violated_refs:
                 new_params = {}
                 for k, v in mg.geometry_params.items():
-                    if isinstance(v, (int, float)) and k not in ("angle",):
+                    if isinstance(v, (int, float)) and k != "angle":
                         new_val = v * factor
                         new_params[k] = round(new_val, 2)
                         if new_val != v:
                             any_changed = True
                     else:
                         new_params[k] = v
-                logger.info(
-                    f"DRC修正 {mg.reference}: {mg.geometry_params} → {new_params}"
-                )
                 adjusted.append(MappedGeometry(
                     reference=mg.reference,
                     target_pcell=mg.target_pcell,
@@ -321,195 +480,78 @@ class Runner:
 
         return adjusted if any_changed else mapped
 
-    def _save_snapshot(self) -> Optional[Path]:
-        """保存输入GDS快照。"""
-        snapshot_dir = self._config.snapshot_dir or str(Path(self._config.state_dir) / "snapshots")
-        snapshot_dir = Path(snapshot_dir)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        snapshot_path = snapshot_dir / f"pre_update_{ts}.gds"
+    # ── LVS ──
 
-        src = Path(self._config.gds_path)
-        if src.exists():
-            shutil.copy2(src, snapshot_path)
-            logger.info(f"快照已保存: {snapshot_path}")
-            return snapshot_path
-        return None
-
-    def _extract_old_pin_states(
-        self,
-        params_snapshot: Optional[ParamsSnapshot],
-        mapped: list[MappedGeometry],
-    ) -> Dict[str, PinState]:
-        """从参数快照提取旧引脚状态。
-
-        Args:
-            params_snapshot: 上次成功的参数快照
-            mapped: 当前待更新的器件映射
-
-        Returns:
-            {ref.pin_name: PinState}
-        """
-        if params_snapshot is None:
-            return {}
-
-        old_pins: Dict[str, PinState] = {}
-        for mg in mapped:
-            if mg.reference not in params_snapshot.devices:
-                continue
-            dev_snap = params_snapshot.devices[mg.reference]
-            for pin_name, pin_snap in dev_snap.pins.items():
-                key = f"{mg.reference}.{pin_name}"
-                old_pins[key] = PinState(
-                    name=pin_name,
-                    ref=mg.reference,
-                    x=pin_snap.x,
-                    y=pin_snap.y,
-                )
-        return old_pins
-
-    def _save_params_snapshot(
-        self,
-        mapped: list[MappedGeometry],
-        exec_result: ExecutionResult,
-    ) -> None:
-        """保存当前参数快照（DRC通过后调用）。"""
-        from pcells.registry import get_pcell
-
-        devices: Dict[str, DeviceSnapshot] = {}
-        for mg in mapped:
-            try:
-                pcell = get_pcell(mg.target_pcell)
-                pin_positions = pcell.get_pin_positions(mg.geometry_params)
-                pins = {
-                    pin_name: PinSnapshot(name=pin_name, x=pos.x, y=pos.y)
-                    for pin_name, pos in pin_positions.items()
-                }
-                devices[mg.reference] = DeviceSnapshot(
-                    ref=mg.reference,
-                    pcell_type=mg.target_pcell,
-                    params=mg.geometry_params,
-                    pins=pins,
-                )
-            except Exception as e:
-                logger.warning(f"快照保存时无法获取{mg.reference}引脚: {e}")
-
-        snapshot = ParamsSnapshot(
-            gds_path=self._config.output_path,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            devices=devices,
-        )
-        self._snapshot_mgr.save_params_state(self._params_snapshot_path, snapshot)
-
-    def _run_lvs(
-        self,
-        mapped: list[MappedGeometry],
-        snapshot_path: Optional[Path],
-    ):
-        """执行LVS验证。
-
-        Returns:
-            LVSResult if lvs_enabled else None
-        """
-        from pcells.registry import get_pcell
-
-        # 构建 schematic_nets: {net_name: [ref.pin_name, ...]}
+    def _run_lvs(self, nets: list, mapped: list[MappedGeometry]):
+        """执行LVS验证。"""
         schematic_nets: Dict[str, List[str]] = {}
-        for net in self._nets:
+        for net in nets:
             if net.name:
-                schematic_nets[net.name] = [
-                    f"{ref}.{pin}" for ref, pin in net.nodes
-                ]
-
-        # 构建 pin_positions: {ref.pin_name: (x_um, y_um)}
-        # 遍历top cell实例，从cell名+marker文本构造ref.pin_name
-        pin_positions: Dict[str, Tuple[float, float]] = {}
+                schematic_nets[net.name] = [f"{ref}.{pin}" for ref, pin in net.nodes]
 
         layout = db.Layout()
         layout.read(self._config.output_path)
         top_cell = layout.top_cell()
         if top_cell is None:
-            logger.warning("LVS: 无法读取top cell")
             return None
 
-        marker_layer = layout.layer(db.LayerInfo(255, 0))
-        if marker_layer < 0:
-            logger.warning("LVS: 未找到PIN marker层(255/0)")
-            return None
+        # 复用 pin_extractor 提取引脚坐标
+        ref_pin_positions = extract_pin_positions(layout, top_cell)
 
-        # 建立 ref → (cell, instance_transform) 的映射
-        ref_to_cell: Dict[str, db.Cell] = {}
-        ref_to_trans: Dict[str, db.Trans] = {}
-        for mg in mapped:
-            for inst in top_cell.each_inst():
-                cell = inst.cell
-                if cell.name.startswith(f"{mg.reference}_") or cell.name == mg.reference:
-                    ref_to_cell[mg.reference] = cell
-                    ref_to_trans[mg.reference] = inst.trans
-                    break
-
-        # 遍历子cell的PIN marker，将本地坐标变换为全局坐标
-        for ref, cell in ref_to_cell.items():
-            inst_trans = ref_to_trans[ref]
-            for shape in cell.shapes(marker_layer).each():
-                if shape.is_text():
-                    text_obj = shape.text
-                    pin_label = text_obj.string
-                    # 本地坐标(dbu) → 全局坐标(dbu)
-                    local_pt = db.Point(text_obj.x, text_obj.y)
-                    global_pt = inst_trans * local_pt
-                    # dbu → um
-                    px_um = global_pt.x * layout.dbu
-                    py_um = global_pt.y * layout.dbu
-                    pin_key = f"{ref}.{pin_label}"
-                    pin_positions[pin_key] = (px_um, py_um)
+        pin_positions: Dict[str, Tuple[float, float]] = {}
+        for ref, pins in ref_pin_positions.items():
+            for pin_name, (x, y) in pins.items():
+                pin_positions[f"{ref}.{pin_name}"] = (x, y)
 
         if not pin_positions:
-            logger.warning("LVS: 未找到任何PIN markers")
+            logger.warning("LVS: 未找到PIN markers")
             return None
 
-        logger.info(f"LVS: {len(schematic_nets)} nets, {len(pin_positions)} pins")
-
-        # 执行LVS
-        lvs_result = self._lvs_runner.run(
+        return self._lvs_runner.run(
             gds_path=self._config.output_path,
             schematic_nets=schematic_nets,
             pin_positions=pin_positions,
         )
 
-        if lvs_result.passed:
-            logger.info("LVS通过")
-        else:
-            for v in lvs_result.violations:
-                logger.warning(f"LVS违例: {v.violation_type} {v.net_name}: {v.description}")
+    # ── 辅助方法 ──
 
-        return lvs_result
+    def _find_cell_by_reference(
+        self, layout: db.Layout, reference: str
+    ) -> Optional[db.Cell]:
+        """按 reference 定位 Cell。"""
+        top_cell = layout.top_cell()
+        if top_cell is None:
+            return None
+        for inst in top_cell.each_inst():
+            cell = inst.cell
+            if cell.name == reference or cell.name.startswith(f"{reference}_"):
+                return cell
+        return None
 
     def _append_history(
         self,
+        diff_result: NetlistDiffResult,
         mapped: list[MappedGeometry],
         exec_result: ExecutionResult,
         drc_result: Optional[ValidationResult],
         errors: list[str],
         drc_retries: int,
     ) -> None:
-        """追加操作历史到history.jsonl。"""
+        """追加操作历史。"""
         if not self._config.history_path:
             return
-
         history_path = Path(self._config.history_path)
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         entry = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "action": "layout_update",
-            "params": [
-                {
-                    "reference": mg.reference,
-                    "pcell": mg.target_pcell,
-                    "geometry": mg.geometry_params,
-                    "warnings": mg.warnings,
-                }
+            "changes": [
+                {"reference": d.reference, "old_value": d.old_value, "new_value": d.new_value}
+                for d in diff_result.changed
+            ],
+            "mapped": [
+                {"reference": mg.reference, "pcell": mg.target_pcell, "geometry": mg.geometry_params}
                 for mg in mapped
             ],
             "result": "success" if not errors else "partial_failure",
