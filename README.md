@@ -47,6 +47,360 @@ PAM (Parameterized Auto-layout Manager) 是一个 RF 无源电路版图迭代自
 
 ---
 
+## 输入依赖与要求
+
+PAM 运行依赖三类输入：**网表文件**、**GDS 版图**、**PDK 配置**。以下详细说明每类输入的要求。
+
+### 1. 网表文件要求
+
+#### 格式
+
+当前支持 KiCad S-expression 格式（`.net` 文件），由 KiCad 8.0 导出。文件扩展名需为 `.net` 或 `.sexp`。
+
+#### 文件结构
+
+```sexp
+(export (version "E")
+  (design
+    (source "<原理图路径>")
+    (date "<日期>")
+    (tool "KiCad 8.0")
+  )
+  (components
+    (comp (ref "<位号>")
+      (value "<器件值>")
+      (footprint "<封装>")
+      (libsource (lib "<库名>") (part "<器件类型名>") (description "<描述>"))
+    )
+    ...
+  )
+  (nets
+    (net (code <编号>) (name "<网络名>")
+      (node (ref "<位号>") (pin "<引脚名>"))
+      (node (ref "<位号>") (pin "<引脚名>"))
+    )
+    ...
+  )
+)
+```
+
+#### 字段说明
+
+| 字段 | 必填 | 说明 | 示例 |
+|------|------|------|------|
+| `ref` | 是 | 器件位号，全局唯一 | `"C1"`, `"TL1"`, `"L2"` |
+| `value` | 是 | 器件值，格式与器件类型对应（见下表） | `"1pF"`, `"50Ohm/1000um"` |
+| `part` | 是 | 器件类型名，必须与 `mapping_rules.yaml` 中的 key 对应 | `"CAP_MIM"`, `"IND_SPIRAL"`, `"TL_MICROSTRIP"` |
+| `lib` | 否 | KiCad 库名 | `"RF"` |
+| `footprint` | 否 | 封装名 | `"RF:MIM_Cap"` |
+| `description` | 否 | 器件描述 | `"MIM Capacitor"` |
+
+#### 器件值格式
+
+不同器件类型的 `value` 字段格式不同，PAM 依赖此格式解析电气参数：
+
+| 器件类型 (`part`) | value 格式 | 解析结果 | 示例 |
+|-------------------|-----------|----------|------|
+| `CAP_MIM` | `{数值}pF` | `{"capacitance_pf": 数值}` | `"1pF"` → `{"capacitance_pf": 1.0}` |
+| `CAP_MIM` | `{数值}fF` | `{"capacitance_pf": 数值/1000}` | `"500fF"` → `{"capacitance_pf": 0.5}` |
+| `IND_SPIRAL` | `{数值}nH` | `{"inductance_nH": 数值}` | `"2.5nH"` → `{"inductance_nH": 2.5}` |
+| `TL_MICROSTRIP` | `{阻抗}Ohm/{长度}um` | `{"impedance_ohm": 阻抗, "length_um": 长度}` | `"50Ohm/1000um"` → `{"impedance_ohm": 50.0, "length_um": 1000.0}` |
+| `TL_MICROSTRIP` | `{阻抗}Ohm_{长度}um` | 同上（`_` 代替 `/`） | `"50Ohm_2000um"` |
+
+支持小数，如 `"1.5pF"`, `"3.5nH"`, `"72.5Ohm/1500um"`。
+
+#### 引脚名约定
+
+| 器件类型 | 引脚名 | 含义 |
+|----------|--------|------|
+| `CAP_MIM` | `PI` | 上极板（正端） |
+| `CAP_MIM` | `NIN` | 下极板（负端，通常接地） |
+| `IND_SPIRAL` | `PI` | 外端（起始端） |
+| `IND_SPIRAL` | `NIN` | 底端（underpass 端） |
+| `TL_MICROSTRIP` | `P1` | 输入端 |
+| `TL_MICROSTRIP` | `P2` | 输出端 |
+
+网表中的 `(node (ref "C1") (pin "PI"))` 中的引脚名必须与上表一致。
+
+#### 网络连接规则
+
+- 每个引脚只能属于一个网络（一个引脚不能出现在两个 `net` 中）
+- 一个网络可以包含 2 个或更多节点（Pi/T 型 junction 节点有 3+ 节点）
+- `RFIN` 和 `RFOUT` 为保留网络名，标识输入输出端口
+- `GND` 为保留网络名，标识接地
+
+#### 差异比较约束
+
+`原始网表` 和 `修改后网表` 的差异比较规则：
+- **支持**：已有器件的 `value` 值变更（如 `1pF` → `2pF`）
+- **警告（不阻断）**：器件类型名变更（如 `CAP_MIM` → `CAP_MIM_V2`），此时跳过值比较
+- **报错（阻断）**：器件增减（原始网表有而修改后没有，或反之）
+
+---
+
+### 2. GDS 版图要求
+
+#### 版图层级结构
+
+PAM 要求输入 GDS 遵循两级层级结构：
+
+```
+TOP (top cell)                              ← 连线画在 top cell 的金属层上
+  ├── C1_CAP_MIM (instance)                 ← 第1层：器件实例
+  │     ├── [上极板 Metal 10/0 几何]
+  │     ├── [下极板 Metal 8/0 几何]
+  │     ├── [MIM 介质 9/0 几何]
+  │     ├── [Via 9/1 几何]
+  │     └── [PIN marker 255/0 "PI"/"NIN" 文本]  ← 第2层：引脚标记
+  ├── L1_IND_SPIRAL (instance)
+  │     ├── [顶层走线 Metal 7/0]
+  │     ├── [底层走线 Metal 6/0]
+  │     ├── [Via 11/0]
+  │     └── [PIN marker 255/0 "PI"/"NIN" 文本]
+  └── TL1_TL_MICROSTRIP (instance)
+        ├── [信号线 Metal 6/0]
+        ├── [地平面 2/0]
+        └── [PIN marker 255/0 "P1"/"P2" 文本]
+```
+
+#### 关键要求
+
+| 要求 | 说明 | 不满足的后果 |
+|------|------|-------------|
+| **Cell 命名** | sub-cell 名必须为 `{位号}_{PCell名}` | PAM 无法通过位号匹配到对应 cell |
+| **PIN marker 层** | 每个器件 sub-cell 必须在 `255/0` 层放置文本标签 | PAM 无法提取引脚坐标，布线失败 |
+| **PIN marker 文本** | 文本内容必须与网表中引脚名一致（`PI`, `NIN`, `P1`, `P2`） | 引脚无法关联到网络 |
+| **实例层级** | 器件实例必须是 top cell 的直接子实例 | 嵌套实例不会被扫描到 |
+| **连线层级** | 金属连线必须画在 top cell 上（不在 sub-cell 内） | 连线提取失败或归属错误 |
+| **器件几何** | 器件几何画在各自的 sub-cell 内 | 几何与连线混淆，提取错误 |
+
+#### Sub-cell 命名约定
+
+```
+格式: {位号}_{PCell注册名}
+
+示例:
+  C1_CAP_MIM          → 位号 C1, MIM 电容
+  L1_IND_SPIRAL       → 位号 L1, 螺旋电感
+  TL1_TL_MICROSTRIP   → 位号 TL1, 微带传输线
+  C10_CAP_MIM         → 位号 C10 (注意：C1 不会误匹配 C10)
+```
+
+命名规则：
+- 位号与 PCell 名之间用 `_` 分隔
+- PAM 通过检查分隔后第二部分首字符是否为字母来区分 `C1_CAP_MIM`（正确）和 `C10`（不会误匹配为 `C1` + `0`）
+- 位号不能包含下划线
+
+#### 层定义
+
+PAM 使用以下 GDS 层号（当前硬编码，后续将迁移到 PDK 配置）：
+
+| 层号/数据类型 | 物理含义 | 使用器件 | 说明 |
+|-------------|---------|---------|------|
+| `2/0` | 地平面 (GND) | TL_MICROSTRIP | 传输线下方接地金属 |
+| `6/0` | Metal1 信号层 | TL_MICROSTRIP, IND_SPIRAL | 传输线信号、电感底层走线、top cell 连线 |
+| `7/0` | Metal2 顶层 | IND_SPIRAL | 电感螺旋顶层走线 |
+| `8/0` | 金属底层 (MB) | CAP_MIM | 电容下极板 |
+| `9/0` | MIM 介质 | CAP_MIM | 电容介质层标识 |
+| `9/1` | 电容 Via | CAP_MIM | 上下极板连接过孔 |
+| `10/0` | 金属顶层 (MT) | CAP_MIM | 电容上极板 |
+| `11/0` | 通孔 (Via) | IND_SPIRAL | 金属层间通孔 |
+| `100/0` | LVS 引脚几何 | 所有器件 | LVS 检查时使用的引脚几何标记 |
+| `200/0` | BROKEN 标记 | 连线 | 布线失败处的 X 标记 + "BROKEN:netname" 文本 |
+| `255/0` | PIN marker | 所有器件 | 引脚位置文本标签，PAM 依赖此层提取引脚坐标 |
+
+#### DRC 规则涉及的层
+
+DRC 规则通过 `config/drc_rules/simple_rf.yaml` 配置，当前覆盖：
+
+| 层 | 检查项 | 默认阈值 |
+|----|--------|---------|
+| `6/0` (Metal1) | min_spacing | 1.0 um |
+| `6/0` (Metal1) | min_width | 2.0 um |
+| `7/0` (Metal2) | min_spacing | 1.0 um |
+| `7/0` (Metal2) | min_width | 3.0 um |
+| `8/0` (MB) | min_spacing | 1.0 um |
+| `9/0` (MIM) | min_area | 100 um² |
+| `10/0` (MT) | min_spacing | 1.0 um |
+
+#### 引脚坐标提取原理
+
+PAM 从 GDS 中提取引脚坐标的过程：
+
+1. 遍历 top cell 下所有 instance
+2. 对每个 instance，读取其 sub-cell 中 `255/0` 层的文本标签
+3. 标签文本即为引脚名（如 `"PI"`, `"NIN"`, `"P1"`, `"P2"`）
+4. 通过 `instance.dcplx_trans` 将 sub-cell 局部坐标转换为全局坐标（考虑位移、旋转、镜像）
+5. 返回 `{位号: {引脚名: (x_um, y_um)}}`
+
+#### 连线提取原理
+
+PAM 从 GDS top cell 中提取金属连线的过程：
+
+1. 收集 top cell 上所有金属层 Shape（排除 `255/0` PIN marker 层）
+2. 对每个 Shape 构造 BoundingBox
+3. 查询哪些引脚落在 Box 内（通过引脚坐标判断）
+4. 利用网表的 `pin → net` 映射将 Shape 归属到对应网络
+5. 若 Shape 同时触及多个网络的引脚，发出警告并跳过该 Shape
+
+---
+
+### 3. PDK 配置要求
+
+PDK 配置以 YAML 文件形式提供，通过 `--pdk-config` 参数指定。不传则使用默认的 `config/mapping_rules.yaml`。
+
+#### mapping_rules.yaml 结构
+
+```yaml
+# 每种器件类型一个顶级 key
+<device_type>:
+  target_pcell: str           # PCell 注册名，必须与 pcells/registry.py 中 @register() 一致
+  param_mapping: dict         # 查表字段名 → PCell 参数名的映射
+  defaults: dict              # PCell 参数默认值（查表结果缺失时补充）
+  constraints: dict           # 几何参数约束边界
+  lookup_table: list[dict]    # 电气参数 → 几何参数 查找表
+```
+
+#### 各字段详解
+
+**`target_pcell`**：指定该器件类型使用哪个 PCell 生成版图。
+
+| device_type | target_pcell | 说明 |
+|-------------|-------------|------|
+| `capacitor_mim` | `CAP_MIM` | MIM 电容器 |
+| `inductor_spiral` | `IND_SPIRAL` | 螺旋电感器 |
+| `transmission_line` | `TL_MICROSTRIP` | 微带传输线 |
+
+**`param_mapping`**：查表结果字段名到 PCell 参数名的重命名映射。查表返回的字段名可能与 PCell 接口参数名不同，通过此字段对齐。
+
+```yaml
+param_mapping:
+  length_um: length    # 查表字段 "length_um" → PCell 参数 "length"
+  # 同名字段可省略，如 length: length
+```
+
+**`defaults`**：PCell 参数默认值。查表结果中不包含的字段由此补充。
+
+```yaml
+defaults:
+  spacing: 8.0         # 电感默认间距
+  angle: 0.0           # 默认水平放置
+```
+
+**`constraints`**：几何参数的边界约束。PCell 生成前会校验参数是否在范围内。
+
+```yaml
+constraints:
+  length: { min: 10, max: 200 }   # 长度 10~200 um
+  width:  { min: 10, max: 200 }   # 宽度 10~200 um
+```
+
+- 约束缺失 → 该参数不校验，直接通过
+- 参数越界 → 该器件更新被跳过（不阻断其他器件）
+- 不在约束中的参数 → 不校验
+
+**`lookup_table`**：电气参数到几何参数的查找表。PAM 使用欧氏距离在表中查找最近邻行。
+
+```yaml
+lookup_table:
+  - { capacitance_pf: 0.5, length: 28,  width: 28  }
+  - { capacitance_pf: 1.0, length: 40,  width: 40  }
+  - { capacitance_pf: 2.0, length: 57,  width: 57  }
+  - { capacitance_pf: 3.0, length: 70,  width: 70  }
+  - { capacitance_pf: 5.0, length: 90,  width: 90  }
+  - { capacitance_pf: 10.0, length: 127, width: 127 }
+```
+
+查找规则：
+- 输入电气参数与表中每行计算欧氏距离
+- 取距离最近的行作为映射结果
+- 如果输入恰好不在表中（如 `1.5pF`），会匹配到最近行（`1pF` 或 `2pF`）
+- 多维参数（如传输线的阻抗+长度）同时参与距离计算
+
+#### drc_rules.yaml 结构
+
+DRC 规则独立于映射规则，用于版图更新后的设计规则验证。
+
+```yaml
+rules:
+  - name: str              # 规则名，如 "metal1.min_spacing"
+    layer: "layer/datatype" # GDS 层号，如 "6/0"
+    type: str               # 检查类型: spacing | width | area | not_empty
+    value: float            # 阈值 (um 或 um²)
+    severity: str           # 严重级别: error | warning
+```
+
+| 检查类型 | 含义 | value 单位 |
+|---------|------|-----------|
+| `spacing` | 同层图形最小间距 | um |
+| `width` | 同层图形最小线宽 | um |
+| `area` | 同层图形最小面积 | um² |
+| `not_empty` | 该层不能为空 | — (value 被忽略) |
+
+#### PDK 适配说明
+
+当前 PAM 内置了一套示例 PDK 配置。实际使用时需要根据目标工艺替换：
+
+| 需要适配的内容 | 配置位置 | 说明 |
+|-------------|---------|------|
+| 电气→几何映射表 | `mapping_rules.yaml` 的 `lookup_table` | 不同工艺相同电容值的版图尺寸不同 |
+| 几何参数约束 | `mapping_rules.yaml` 的 `constraints` | 不同工艺的最小/最大尺寸限制不同 |
+| DRC 规则阈值 | `drc_rules/*.yaml` | 不同工艺的间距/线宽/面积规则不同 |
+| PCell 层号定义 | `pcells/*/pcell.py` (硬编码) | 不同工艺的金属层编号不同（后续将迁移到配置） |
+| PCell 几何规则 | `pcells/*/pcell.py` | 不同工艺的器件结构可能不同 |
+
+使用自定义 PDK 配置：
+```bash
+pam run \
+  --pdk-config /path/to/my_pdk/mapping_rules.yaml \
+  ...
+```
+
+---
+
+### 4. 支持的器件类型
+
+| 器件类型 | 网表 part 名 | 映射规则 key | PCell | 电气参数 | 几何参数 |
+|---------|-------------|-------------|-------|---------|---------|
+| MIM 电容 | `CAP_MIM` | `capacitor_mim` | `CAP_MIM` | `capacitance_pf` | `length`, `width` |
+| 螺旋电感 | `IND_SPIRAL` | `inductor_spiral` | `IND_SPIRAL` | `inductance_nH` | `inner_radius`, `turns`, `width`, `spacing`, `angle` |
+| 微带传输线 | `TL_MICROSTRIP` | `transmission_line` | `TL_MICROSTRIP` | `impedance_ohm`, `length_um` | `width`, `length`, `angle` |
+
+网表 → 映射 → PCell 的对应链路：
+
+```
+网表 part 名 "CAP_MIM"
+  → value_to_device_type() → "capacitor_mim"
+  → mapping_rules.yaml key → target_pcell: "CAP_MIM"
+  → pcells/registry.py → MIMCapacitor PCell
+```
+
+---
+
+### 5. 软件依赖
+
+| 依赖 | 版本要求 | 说明 |
+|------|---------|------|
+| Python | ≥ 3.10 | 使用 `match` 语法、`type` 联合语法 |
+| KLayout | ≥ 0.28 | 提供 `klayout.db` Python 模块，用于 GDS 读写和几何操作 |
+| PyYAML | — | 解析 PDK 配置和 DRC 规则 |
+| sexpdata | — | KiCad S-expression 网表解析 |
+
+安装：
+```bash
+git clone <repo-url>
+cd pam-mvp-v5
+pip install -e .
+```
+
+验证安装：
+```bash
+python -c "import klayout.db; print('KLayout OK')"
+pam --help
+```
+
+---
+
 ## 模块详解
 
 ### 1. parser — 网表解析模块
@@ -484,52 +838,6 @@ class BasePCell(ABC):
 | `config/drc_rules/simple_rf.yaml` | DRC 规则 | spacing/width/area/not_empty 检查项 |
 
 通过 `--pdk-config` 参数可指定用户自定义的映射规则文件，不传则使用默认配置。
-
----
-
-## GDS 版图结构约定
-
-PAM 对输入 GDS 有以下结构要求：
-
-```
-TOP (top cell)                         ← 连线画在这一层
-  ├── C1_CAP_MIM (instance)            ← 器件实例
-  │     └── [PIN marker 255/0 文本]    ← 引脚位置标记
-  ├── L1_IND_SPIRAL (instance)
-  │     └── [PIN marker 255/0 文本]
-  └── TL1_TL_MICROSTRIP (instance)
-        └── [PIN marker 255/0 文本]
-```
-
-**命名约定**：sub-cell 名 = `{位号}_{PCell名}`，如 `C1_CAP_MIM`、`L1_IND_SPIRAL`。
-
-**层约定**（当前硬编码，后续将迁移到 PDK 配置）：
-
-| 层号 | 用途 |
-|------|------|
-| 2/0 | 传输线地平面 |
-| 6/0 | Metal1（传输线信号、电感底层走线） |
-| 7/0 | Metal2（电感顶层走线） |
-| 8/0 | 电容下极板 |
-| 9/0 | MIM 介质层 |
-| 9/1 | 电容 Via |
-| 10/0 | 电容上极板 |
-| 11/0 | 通孔层 |
-| 100/0 | LVS 引脚标记（几何） |
-| 200/0 | BROKEN 连线标记 |
-| 255/0 | PIN marker（文本标签，引脚定位用） |
-
----
-
-## 安装
-
-```bash
-git clone <repo-url>
-cd pam-mvp-v5
-pip install -e .
-```
-
-依赖：Python ≥ 3.10, KLayout (klayout.db Python 模块)。
 
 ---
 
